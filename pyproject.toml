@@ -1,0 +1,30 @@
+[project]
+name = "seed"
+version = "1.0.0"
+description = "Seed — 统一安装编排：seed-engine + seed-services + seed-tools"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "CodeAgent Contributors" }]
+dependencies = [
+    "seed-engine @ file:///Users/kun/seed-engine",
+    "seed-services @ file:///Users/kun/seed-services",
+    "seed-tools @ file:///Users/kun/seed-tools",
+]
+
+[project.scripts]
+seed = "seed.cli:main"
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["seed*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "SIM"]
+ignore = ["E501"]
