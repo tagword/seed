@@ -1,15 +1,18 @@
 [project]
 name = "seed"
 version = "1.0.0"
-description = "Seed — 统一安装编排：seed-engine + seed-services + seed-tools"
+description = "Seed — agent kernel (seed.core) and integrations (seed.integrations)"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "CodeAgent Contributors" }]
 dependencies = [
-    "seed-engine",
-    "seed-services",
-    "seed-tools",
+    "httpx",
+    "requests>=2.28.0",
+    "ddgs>=9.14.0",
 ]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "ruff>=0.4.0", "bandit>=1.7.0"]
 
 [project.scripts]
 seed = "seed.cli:main"
@@ -19,6 +22,7 @@ requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
+where = ["."]
 include = ["seed*"]
 
 [tool.ruff]

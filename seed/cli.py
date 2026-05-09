@@ -2,8 +2,8 @@
 Seed CLI — 简单编排入口。
 
 用法:
-    seed info         查看各组件版本
-    seed check        检查各组件是否可正常导入
+    seed info         查看各子包版本
+    seed check        检查各子包是否可正常导入
 """
 
 import importlib
@@ -19,13 +19,12 @@ def _import_check(name: str) -> bool:
 
 
 def cmd_info():
-    """查看各组件版本。"""
+    """查看各子包版本。"""
     pkgs = {
-        "seed-engine": "seed_engine",
-        "seed-services": "seed_services",
-        "seed-tools": "seed_tools",
+        "seed.core": "seed.core",
+        "seed.integrations": "seed.integrations",
     }
-    print("📦 Seed Components\n")
+    print("📦 Seed (kernel + integrations)\n")
     for display, mod_name in pkgs.items():
         try:
             mod = importlib.import_module(mod_name)
@@ -34,42 +33,55 @@ def cmd_info():
         except ImportError:
             ver = "—"
             status = "❌"
-        print(f"  {status}  {display:<18}  v{ver}")
+        print(f"  {status}  {display:<22}  v{ver}")
 
-    # meta-package itself
+    try:
+        import seed_tools  # noqa: F401
+
+        v = getattr(seed_tools, "__version__", "?")
+        print(f"  ✅  seed_tools (optional)   v{v}")
+    except ImportError:
+        print("  —  seed_tools (optional)   not installed")
+
     try:
         import seed  # noqa: F811
-        print(f"\n  🎯  seed (meta)          v{seed.__version__}")
+
+        print(f"\n  🎯  seed (top-level)      v{seed.__version__}")
     except ImportError:
-        print("\n  🎯  seed (meta)          —")
+        print("\n  🎯  seed (top-level)      —")
 
 
 def cmd_check():
     """检查各组件导入是否正常。"""
     modules = [
-        "seed_engine",
-        "seed_engine.agent_runtime",
-        "seed_engine.llm_sess",
-        "seed_engine.mem_sys",
-        "seed_engine.safety",
-        "seed_engine.engine",
-        "seed_engine.turn_loop",
-        "seed_services",
-        "seed_services.browser",
-        "seed_services.safety",
-        "seed_services.webhook_dedup",
-        "seed_tools",
-        "seed_tools.registry",
-        "seed_tools.executor",
+        "seed.core",
+        "seed.core.tool_runtime",
+        "seed.core.agent_runtime",
+        "seed.core.llm_sess",
+        "seed.core.mem_sys",
+        "seed.core.safety",
+        "seed.core.engine",
+        "seed.core.turn_loop",
+        "seed.core.sess_store",
+        "seed.integrations",
+        "seed.integrations.browser",
+        "seed.integrations.safety",
+        "seed.integrations.webhook_dedup",
         "seed.models",
     ]
     all_ok = True
-    print("🔍 组件导入检查\n")
+    print("🔍 导入检查\n")
     for mod in modules:
         ok = _import_check(mod)
         if not ok:
             all_ok = False
         print(f"  {'✅' if ok else '❌'}  {mod}")
+
+    print()
+    ok_tools = _import_check("seed_tools")
+    if not ok_tools:
+        all_ok = False
+    print(f"  {'✅' if ok_tools else '❌'}  seed_tools (install seed-tools if missing)")
     sys.exit(0 if all_ok else 1)
 
 
@@ -83,9 +95,9 @@ def main():
     elif cmd == "check":
         cmd_check()
     else:
-        print(f"未知命令: {cmd}")
-        print(__doc__.strip())
-        sys.exit(1)
+        print(f"未知命令: {cmd}", file=sys.stderr)
+        print(__doc__.strip(), file=sys.stderr)
+        sys.exit(2)
 
 
 if __name__ == "__main__":

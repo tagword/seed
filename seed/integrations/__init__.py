@@ -1,0 +1,41 @@
+"""Integrations: browser, safety bridge, webhooks, transcripts, messaging — depend on ``seed.core``."""
+
+from seed.integrations.browser import BROWSER, ensure_browser_running, BrowserError
+from seed.integrations.safety import (
+    check_bash_command,
+    enforce_bash_timeout,
+    sanitize_assistant_output,
+    sanitize_tool_output,
+)
+from seed.integrations.webhook_dedup import (
+    compute_webhook_dedup_key,
+    dedup_enabled,
+    reset_webhook_dedup_cache,
+    try_acquire,
+    try_acquire_report,
+)
+
+# Bridge services (depend on seed-engine)
+from seed.integrations.message_api import to_openai_chat_payload
+from seed.integrations.session_title import llm_generate_display_title, maybe_llm_refresh_session_title
+from seed.integrations.transcript_store import transcript_jsonl_path, append_transcript_entries
+
+__all__ = (
+    "BROWSER",
+    "ensure_browser_running",
+    "BrowserError",
+    "check_bash_command",
+    "enforce_bash_timeout",
+    "sanitize_assistant_output",
+    "sanitize_tool_output",
+    "compute_webhook_dedup_key",
+    "dedup_enabled",
+    "reset_webhook_dedup_cache",
+    "try_acquire",
+    "try_acquire_report",
+    "to_openai_chat_payload",
+    "llm_generate_display_title",
+    "maybe_llm_refresh_session_title",
+    "transcript_jsonl_path",
+    "append_transcript_entries",
+)
