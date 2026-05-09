@@ -49,14 +49,19 @@ def cmd_check():
     modules = [
         "seed_engine",
         "seed_engine.agent_runtime",
-        "seed_engine.session",
-        "seed_engine.memory",
+        "seed_engine.llm_sess",
+        "seed_engine.mem_sys",
         "seed_engine.safety",
+        "seed_engine.engine",
+        "seed_engine.turn_loop",
         "seed_services",
         "seed_services.browser",
         "seed_services.safety",
+        "seed_services.webhook_dedup",
         "seed_tools",
-        "seed_tools.tool_base",
+        "seed_tools.registry",
+        "seed_tools.executor",
+        "seed.models",
     ]
     all_ok = True
     print("🔍 组件导入检查\n")
