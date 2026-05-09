@@ -6,9 +6,9 @@ requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "CodeAgent Contributors" }]
 dependencies = [
-    "seed-engine @ file:///Users/kun/seed-engine",
-    "seed-services @ file:///Users/kun/seed-services",
-    "seed-tools @ file:///Users/kun/seed-tools",
+    "seed-engine",
+    "seed-services",
+    "seed-tools",
 ]
 
 [project.scripts]

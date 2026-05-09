@@ -1,0 +1,13 @@
+# Seed — local development install
+#   pip install -r requirements.txt
+#
+# Or step by step:
+#   pip install -e /Users/kun/seed-engine
+#   pip install -e /Users/kun/seed-services
+#   pip install -e /Users/kun/seed-tools
+#   pip install -e /Users/kun/seed
+
+-e /Users/kun/seed-engine
+-e /Users/kun/seed-services
+-e /Users/kun/seed-tools
+-e /Users/kun/seed
