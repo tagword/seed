@@ -15,7 +15,7 @@ from seed.integrations.webhook_dedup import (
     try_acquire_report,
 )
 
-# Bridge services (depend on seed-engine)
+# HTTP / UI helpers (depend on seed.core for sessions and LLM types)
 from seed.integrations.message_api import to_openai_chat_payload
 from seed.integrations.session_title import llm_generate_display_title, maybe_llm_refresh_session_title
 from seed.integrations.transcript_store import transcript_jsonl_path, append_transcript_entries

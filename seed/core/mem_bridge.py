@@ -6,14 +6,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from seed.core import env_access as _ea
 from seed.core.mem_sys import MemorySystem
 
 
-_EPISODIC_START = "\n## CodeAgent episodic memory (recent)\n"
-_EPISODIC_END = "\n## End CodeAgent episodic memory\n"
+_EPISODIC_START = "\n## Seed episodic memory (recent)\n"
+_EPISODIC_END = "\n## End Seed episodic memory\n"
 
 _EPISODIC_BLOCK = re.compile(
-    r"\n## CodeAgent episodic memory \(recent\)\n.*?\n## End CodeAgent episodic memory\n",
+    r"(?:\n## CodeAgent episodic memory \(recent\)\n.*?\n## End CodeAgent episodic memory\n"
+    r"|\n## Seed episodic memory \(recent\)\n.*?\n## End Seed episodic memory\n)",
     re.DOTALL,
 )
 
@@ -178,17 +180,15 @@ def apply_episodic_to_messages(
     project_scope: bool = False,
 ) -> None:
     """Mutates messages[0] system content: refresh episodic block."""
-    import os
-
     if not messages or messages[0].get("role") != "system":
         return
-    if os.environ.get("CODEAGENT_MEMORY_INJECT", "1").lower() in ("0", "false", "no"):
+    if _ea.pick_default("1", *_ea.MEMORY_INJECT).lower() in ("0", "false", "no"):
         content = strip_episodic_block(str(messages[0].get("content") or ""))
         messages[0]["content"] = content
         return
 
-    max_c = int(os.environ.get("CODEAGENT_MEMORY_INJECT_MAX_CHARS", "5000"))
-    session_only = os.environ.get("CODEAGENT_MEMORY_INJECT_SESSION_ONLY", "").lower() in (
+    max_c = int(_ea.pick_default("5000", *_ea.MEMORY_INJECT_MAX_CHARS))
+    session_only = _ea.pick_default("", *_ea.MEMORY_INJECT_SESSION_ONLY).lower() in (
         "1",
         "true",
         "yes",

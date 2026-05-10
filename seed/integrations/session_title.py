@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import logging
-import os
 import re
 from typing import Any, Dict, List, Optional
 
+from seed.core import env_access as _ea
 from seed.core.llm_sess import persist_chat_session
 from seed.core.models import Session
 
@@ -16,6 +16,34 @@ _THINKING_LINE = re.compile(
     r"(?is)^(thinking\s*process|思考过程|思维链|chain\s*of\s*thought|<redacted_thinking|<think\b|\*\*thinking)",
 )
 _BULLET_ANALYZE = re.compile(r"^\s*\d+\.\s*\*\*\s*analyze\b", re.I)
+
+# Auto-continue / strategy nudges (often injected as synthetic user messages).
+# Must not drive session titles — aligned with CodeAgent ``_auto_continue_nudge`` outputs.
+_AUTO_CONTINUE_NUDGE_PREFIX = "请继续完成未完成事项"
+_AUTO_CONTINUE_PLAYBOOK_PREFIX = "上一段连续在"
+_AUTO_CONTINUE_STRATEGY_TRIGGER = "【策略切换触发】"
+
+
+def _is_user_content_session_title_nudge(content: str) -> bool:
+    """True if this user message is an auto-continue nudge, not real user intent."""
+    t = (content or "").strip()
+    if not t:
+        return False
+    if t.startswith(_AUTO_CONTINUE_NUDGE_PREFIX):
+        return True
+    if t.startswith(_AUTO_CONTINUE_PLAYBOOK_PREFIX):
+        return True
+    if t.startswith(_AUTO_CONTINUE_STRATEGY_TRIGGER):
+        return True
+    return False
+
+
+def _skip_message_for_session_title(m: Dict[str, Any]) -> bool:
+    if not isinstance(m, dict) or m.get("role") != "user":
+        return False
+    if m.get("_skip_session_title") or m.get("skip_session_title"):
+        return True
+    return _is_user_content_session_title_nudge(str(m.get("content") or ""))
 
 
 def _strip_assistant_noise_for_title(text: str) -> str:
@@ -35,6 +63,8 @@ def _user_context_for_title(messages: List[Dict[str, Any]], *, max_msgs: int = 4
     for m in reversed(messages or []):
         if not isinstance(m, dict) or m.get("role") != "user":
             continue
+        if _skip_message_for_session_title(m):
+            continue
         raw = str(m.get("content") or "").strip().replace("\r\n", "\n")
         if not raw:
             continue
@@ -52,6 +82,8 @@ def _user_context_for_title(messages: List[Dict[str, Any]], *, max_msgs: int = 4
 def _fallback_title_from_users(messages: List[Dict[str, Any]], max_chars: int = 36) -> Optional[str]:
     for m in reversed(messages or []):
         if not isinstance(m, dict) or m.get("role") != "user":
+            continue
+        if _skip_message_for_session_title(m):
             continue
         t = str(m.get("content") or "").strip().replace("\r\n", " ")
         if not t:
@@ -108,7 +140,7 @@ def llm_generate_display_title(llm: Any, session: Session) -> Optional[str]:
     if not ctx.strip():
         return None
     try:
-        max_c = int(os.environ.get("CODEAGENT_SESSION_TITLE_MAX_CHARS", "36"))
+        max_c = int(_ea.pick_default("36", *_ea.SESSION_TITLE_MAX_CHARS))
     except ValueError:
         max_c = 36
     max_c = max(8, min(max_c, 80))
@@ -120,7 +152,7 @@ def llm_generate_display_title(llm: Any, session: Session) -> Optional[str]:
     )
     user_msg = f"用户原话：\n{ctx}\n\n只输出一行标题，不超过{max_c}个字。"
     try:
-        tok = int(os.environ.get("CODEAGENT_SESSION_TITLE_MAX_TOKENS", "96"))
+        tok = int(_ea.pick_default("96", *_ea.SESSION_TITLE_MAX_TOKENS))
     except ValueError:
         tok = 96
     tok = max(24, min(tok, 256))
@@ -153,14 +185,17 @@ def maybe_llm_refresh_session_title(llm: Any, session: Session) -> None:
     """
     Writes metadata.display_title via LLM and re-persists session.
 
-    CODEAGENT_SESSION_TITLE_LLM: default 1; set 0 to disable.
-    CODEAGENT_SESSION_TITLE_MODE: default ``first`` (标题仅在首次成功生成后固定);
+    Synthetic auto-continue ``user`` messages (nudge / strategy playbook) are
+    excluded from title context so the model follows real user intent.
+
+    SEED_SESSION_TITLE_LLM (alias CODEAGENT_*): default 1; set 0 to disable.
+    SEED_SESSION_TITLE_MODE: default ``first`` (标题仅在首次成功生成后固定);
     设为 ``every`` 则每轮对话后重新提炼。
     """
-    raw = os.environ.get("CODEAGENT_SESSION_TITLE_LLM", "1").lower()
+    raw = _ea.pick_default("1", *_ea.SESSION_TITLE_LLM).lower()
     if raw in ("0", "false", "no", "off"):
         return
-    mode = os.environ.get("CODEAGENT_SESSION_TITLE_MODE", "first").strip().lower()
+    mode = _ea.pick_default("first", *_ea.SESSION_TITLE_MODE).strip().lower()
     if mode not in ("first", "every"):
         mode = "first"
     if mode == "first" and session.metadata.get("display_title_source") == "llm":

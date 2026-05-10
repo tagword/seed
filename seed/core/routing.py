@@ -8,7 +8,7 @@ from seed.core.models import CommandEntry
 
 @lru_cache(maxsize=1)
 def _agent_tool_entries() -> tuple:
-    """CodeAgent executor tools (claw-style); cached to avoid repeated registration."""
+    """Registered LLM tools as command entries; cached to avoid repeated registration."""
     from seed_tools import setup_builtin_tools
 
     reg, _ = setup_builtin_tools()
@@ -22,15 +22,15 @@ def invalidate_routing_cache() -> None:
     _agent_tool_entries.cache_clear()
 
 
-def _merged_registry() -> List[CommandEntry]:
-    """Agent tools first; shell/unix registry excludes names that collide with agent tools."""
+def _routing_entries_all() -> List[CommandEntry]:
+    """Agent tools first; static shell-oriented list excludes names that collide with agent tools."""
     agent = list(_agent_tool_entries())
     taken = {e.name.lower() for e in agent}
     shell = [c for c in COMMAND_REGISTRY if c.name.lower() not in taken]
     return agent + shell
 
 
-# 1037 commands from claw-code snapshot - core subset for routing
+# Common shell-oriented command names for routing / demos (subset).
 COMMAND_REGISTRY = [
     CommandEntry("ls", "List directory contents", "filesystem"),
     CommandEntry("pwd", "Print working directory", "filesystem"),
@@ -105,8 +105,8 @@ COMMAND_REGISTRY = [
 
 
 def get_all_commands() -> List[CommandEntry]:
-    """Return shell register plus agent tools (merged)."""
-    return _merged_registry()
+    """Return static shell-oriented entries plus registered agent tools."""
+    return _routing_entries_all()
 
 
 def get_command(name: str, case_insensitive: bool = True) -> Optional[CommandEntry]:
@@ -121,7 +121,7 @@ def get_command(name: str, case_insensitive: bool = True) -> Optional[CommandEnt
         CommandEntry if found, None otherwise
     """
     target = name.lower() if case_insensitive else name
-    for cmd in _merged_registry():
+    for cmd in _routing_entries_all():
         cmd_name = cmd.name.lower() if case_insensitive else cmd.name
         if cmd_name == target:
             return cmd
@@ -140,7 +140,7 @@ def find_commands(query: str, limit: int = 20, case_insensitive: bool = True) ->
     Returns:
         List of matched CommandEntry sorted by match quality
     """
-    return score_entries(query, _merged_registry(), limit=limit, case_insensitive=case_insensitive)
+    return score_entries(query, _routing_entries_all(), limit=limit, case_insensitive=case_insensitive)
 
 
 def score_entries(

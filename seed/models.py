@@ -1,8 +1,5 @@
 """
-Compatibility shim: re-export models from ``seed_engine.models``.
-
-Old code that does ``from seed.models import *`` (e.g. the ``codeagent``
-package) still works without changes.
+Convenience re-export of ``seed.core.models`` for ``from seed.models import …``.
 """
 
 from seed.core.models import (  # noqa: F401,F403

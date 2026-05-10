@@ -12,7 +12,7 @@ def _utc_iso() -> str:
 
 
 # -----------------------------------------------------------------------------
-# Tool / command registry (claw-style + router)
+# Tool metadata and command routing entries
 # -----------------------------------------------------------------------------
 
 
@@ -48,7 +48,7 @@ class CommandRoutingResult:
 
 @dataclass
 class PortingModule:
-    """Legacy command/tool shell definition (execution.py)."""
+    """Shell-oriented command module record used by ``seed.core.execution``."""
 
     name: str
     description: str

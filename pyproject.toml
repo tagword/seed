@@ -4,7 +4,7 @@ version = "1.0.0"
 description = "Seed — agent kernel (seed.core) and integrations (seed.integrations)"
 requires-python = ">=3.9"
 license = { text = "MIT" }
-authors = [{ name = "CodeAgent Contributors" }]
+authors = [{ name = "Seed Contributors" }]
 dependencies = [
     "httpx",
     "requests>=2.28.0",

@@ -1,4 +1,7 @@
-"""Optional repo-local env file: config/codeagent.env (does not override existing os.environ)."""
+"""Optional repo-local env file: ``config/seed.env`` (legacy ``codeagent.env`` if seed file absent).
+
+Does not override existing ``os.environ`` entries.
+"""
 from __future__ import annotations
 
 import os
@@ -7,7 +10,8 @@ from typing import Optional
 
 from seed.core.config_plane import project_root
 
-ENV_FILENAME = "codeagent.env"
+ENV_FILENAME = "seed.env"
+LEGACY_ENV_FILENAME = "codeagent.env"
 
 
 def _parse_line(line: str) -> Optional[tuple[str, str]]:
@@ -26,13 +30,7 @@ def _parse_line(line: str) -> Optional[tuple[str, str]]:
     return key, val
 
 
-def apply_codeagent_env_from_config(base: Optional[Path] = None) -> None:
-    """
-    Load KEY=VALUE lines from <project>/config/codeagent.env.
-    Skips any key already present in os.environ so the shell/export wins.
-    """
-    root = project_root() if base is None else base.resolve()
-    path = root / "config" / ENV_FILENAME
+def _load_env_file(path: Path) -> None:
     if not path.is_file():
         return
     try:
@@ -46,3 +44,25 @@ def apply_codeagent_env_from_config(base: Optional[Path] = None) -> None:
         k, v = pair
         if k not in os.environ:
             os.environ[k] = v
+
+
+def apply_seed_env_from_config(base: Optional[Path] = None) -> None:
+    """
+    Load KEY=VALUE lines from ``<project>/config/seed.env`` when present;
+    otherwise from legacy ``codeagent.env``.
+
+    Skips any key already present in ``os.environ`` so the shell/export wins.
+    """
+    root = project_root() if base is None else base.resolve()
+    cfg = root / "config"
+    seed_p = cfg / ENV_FILENAME
+    leg = cfg / LEGACY_ENV_FILENAME
+    if seed_p.is_file():
+        _load_env_file(seed_p)
+    elif leg.is_file():
+        _load_env_file(leg)
+
+
+def apply_codeagent_env_from_config(base: Optional[Path] = None) -> None:
+    """Deprecated alias for :func:`apply_seed_env_from_config`."""
+    apply_seed_env_from_config(base)

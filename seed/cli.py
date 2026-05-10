@@ -59,7 +59,6 @@ def cmd_check():
         "seed.core.agent_runtime",
         "seed.core.llm_sess",
         "seed.core.mem_sys",
-        "seed.core.safety",
         "seed.core.engine",
         "seed.core.turn_loop",
         "seed.core.sess_store",

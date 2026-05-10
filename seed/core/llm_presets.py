@@ -1,8 +1,9 @@
 """
 LLM Presets Manager - Manage multiple LLM configurations.
 
-Presets are stored in ``config/codeagent.models.json`` as a list of named
-configurations. Each preset has::
+Presets are stored in ``config/seed.models.json`` as a list of named
+configurations (legacy ``codeagent.models.json`` is still read if the seed file is absent).
+Each preset has::
 
     {
         "id": "my-deepseek",
@@ -14,16 +15,12 @@ configurations. Each preset has::
         "max_tokens": 8192
     }
 
-The default preset ID is stored in ``config/codeagent.models.default.txt``.
+The default preset ID is stored in ``config/seed.models.default.txt`` (legacy filename supported for reads).
 Resolution order for ``resolve_preset(None)``:
 
 1. Preset whose ``id`` matches the stored default (if any).
-2. Else ``CODEAGENT_LLM_BASEURL`` / related env vars (if Base URL is non-empty).
-3. Else the **first** preset in ``codeagent.models.json`` that has both Base URL and model
-   (so a single saved preset works without clicking「设为默认」).
-
-On first access, legacy paths ``llm_presets.json`` / ``llm_default.txt`` are
-renamed to the new filenames when the new files do not yet exist.
+2. Else ``SEED_LLM_BASEURL`` / related env vars (if Base URL is non-empty).
+3. Else the **first** preset in the presets file that has both Base URL and model.
 """
 
 from __future__ import annotations
@@ -34,59 +31,51 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from seed.core import env_access as _ea
 from seed.core.config_plane import project_root
 
 logger = logging.getLogger(__name__)
 
-PRESETS_FILENAME = "codeagent.models.json"
-DEFAULT_ID_FILENAME = "codeagent.models.default.txt"
-
-_LEGACY_PRESETS = "llm_presets.json"
-_LEGACY_DEFAULT_ID = "llm_default.txt"
-
-
-def _migrate_legacy_config_paths(cfg: Path) -> None:
-    """Rename legacy preset files if new paths are missing."""
-    try:
-        cfg.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        return
-
-    new_p = cfg / PRESETS_FILENAME
-    old_p = cfg / _LEGACY_PRESETS
-    if not new_p.is_file() and old_p.is_file():
-        try:
-            old_p.replace(new_p)
-        except OSError:
-            try:
-                new_p.write_bytes(old_p.read_bytes())
-                old_p.unlink(missing_ok=True)
-            except OSError as e:
-                logger.warning("Could not migrate %s -> %s: %s", old_p, new_p, e)
-
-    new_d = cfg / DEFAULT_ID_FILENAME
-    old_d = cfg / _LEGACY_DEFAULT_ID
-    if not new_d.is_file() and old_d.is_file():
-        try:
-            old_d.replace(new_d)
-        except OSError:
-            try:
-                new_d.write_bytes(old_d.read_bytes())
-                old_d.unlink(missing_ok=True)
-            except OSError as e:
-                logger.warning("Could not migrate %s -> %s: %s", old_d, new_d, e)
+PRESETS_FILENAME = "seed.models.json"
+LEGACY_PRESETS_FILENAME = "codeagent.models.json"
+DEFAULT_ID_FILENAME = "seed.models.default.txt"
+LEGACY_DEFAULT_ID_FILENAME = "codeagent.models.default.txt"
 
 
-def _presets_path() -> Path:
+def _config_dir() -> Path:
     cfg = project_root() / "config"
-    _migrate_legacy_config_paths(cfg)
-    return cfg / PRESETS_FILENAME
+    cfg.mkdir(parents=True, exist_ok=True)
+    return cfg
 
 
-def _default_id_path() -> Path:
-    cfg = project_root() / "config"
-    _migrate_legacy_config_paths(cfg)
-    return cfg / DEFAULT_ID_FILENAME
+def _presets_read_path() -> Path:
+    cfg = _config_dir()
+    seed_p = cfg / PRESETS_FILENAME
+    leg = cfg / LEGACY_PRESETS_FILENAME
+    if seed_p.is_file():
+        return seed_p
+    if leg.is_file():
+        return leg
+    return seed_p
+
+
+def _presets_write_path() -> Path:
+    return _config_dir() / PRESETS_FILENAME
+
+
+def _default_id_read_path() -> Path:
+    cfg = _config_dir()
+    seed_p = cfg / DEFAULT_ID_FILENAME
+    leg = cfg / LEGACY_DEFAULT_ID_FILENAME
+    if seed_p.is_file():
+        return seed_p
+    if leg.is_file():
+        return leg
+    return seed_p
+
+
+def _default_id_write_path() -> Path:
+    return _config_dir() / DEFAULT_ID_FILENAME
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +83,7 @@ def _default_id_path() -> Path:
 # ---------------------------------------------------------------------------
 
 def load_presets() -> List[Dict[str, Any]]:
-    path = _presets_path()
+    path = _presets_read_path()
     if not path.is_file():
         return []
     try:
@@ -113,7 +102,7 @@ def load_presets() -> List[Dict[str, Any]]:
 
 
 def save_presets(presets: List[Dict[str, Any]]) -> None:
-    path = _presets_path()
+    path = _presets_write_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     clean: List[Dict[str, Any]] = []
     seen: set[str] = set()
@@ -152,7 +141,7 @@ def save_presets(presets: List[Dict[str, Any]]) -> None:
 
 def get_default_preset_id() -> str:
     """Returns the stored default preset ID, or empty string if none."""
-    path = _default_id_path()
+    path = _default_id_read_path()
     if not path.is_file():
         return ""
     try:
@@ -163,7 +152,7 @@ def get_default_preset_id() -> str:
 
 def set_default_preset_id(preset_id: str) -> None:
     """Persist the default preset ID (empty string clears it)."""
-    path = _default_id_path()
+    path = _default_id_write_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         path.write_text((preset_id or "").strip(), encoding="utf-8")
@@ -235,11 +224,11 @@ def llm_executor_from_resolved(cfg: Dict[str, Any]):
 
 def _env_config_dict() -> Dict[str, Any]:
     return {
-        "base_url": (os.environ.get("CODEAGENT_LLM_BASEURL") or "").strip().rstrip("/"),
-        "model": os.environ.get("CODEAGENT_LLM_MODEL", "Qwen/Qwen3.5-35B-A3B-GPTQ-Int4"),
-        "api_key": os.environ.get("CODEAGENT_LLM_API_KEY", "").strip(),
-        "auth_scheme": os.environ.get("CODEAGENT_LLM_AUTH_SCHEME", "Bearer").strip() or "Bearer",
-        "max_tokens": int(os.environ.get("CODEAGENT_LLM_MAX_TOKENS", "8192")),
+        "base_url": _ea.pick_nonempty(*_ea.LLM_BASEURL).rstrip("/"),
+        "model": _ea.pick_default("Qwen/Qwen3.5-35B-A3B-GPTQ-Int4", *_ea.LLM_MODEL),
+        "api_key": _ea.pick_nonempty(*_ea.LLM_API_KEY),
+        "auth_scheme": (_ea.pick_nonempty(*_ea.LLM_AUTH_SCHEME) or "Bearer"),
+        "max_tokens": int(_ea.pick_default("8192", *_ea.LLM_MAX_TOKENS)),
     }
 
 

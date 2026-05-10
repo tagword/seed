@@ -6,9 +6,17 @@ from typing import Optional, List, Dict, Any
 from dataclasses import dataclass, asdict
 from datetime import datetime
 
-# Default paths
-CODEAGENT_DIR = os.path.expanduser("~/.codeagent")
-SESSIONS_DIR = os.path.join(CODEAGENT_DIR, "sessions")
+def default_user_data_dir() -> str:
+    """Prefer ~/.seed; if only ~/.codeagent exists, use it (migration from older installs)."""
+    seed_b = os.path.expanduser("~/.seed")
+    leg_b = os.path.expanduser("~/.codeagent")
+    if os.path.isdir(leg_b) and not os.path.isdir(seed_b):
+        return leg_b
+    return seed_b
+
+
+SEED_USER_DATA_DIR = default_user_data_dir()
+SESSIONS_DIR = os.path.join(SEED_USER_DATA_DIR, "sessions")
 
 @dataclass
 class SessionTokens:

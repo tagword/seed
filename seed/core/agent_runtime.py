@@ -7,6 +7,8 @@ import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from seed.core.chat_events import is_chat_cancelled
+
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +18,7 @@ def _message_ts() -> str:
 
 
 _COMPACT_BLOCK = re.compile(
-    r"\n<<<CODEAGENT_COMPACT>>>\n.*?\n<<<END_CODEAGENT_COMPACT>>>\n",
+    r"\n<<<(?:SEED_COMPACT|CODEAGENT_COMPACT)>>>\n.*?\n<<<END_(?:SEED_COMPACT|CODEAGENT_COMPACT)>>>\n",
     re.DOTALL,
 )
 
@@ -173,7 +175,7 @@ def registry_to_openai_tools(
     *,
     exclude_prefixes: Optional[Sequence[str]] = None,
 ) -> List[Dict[str, Any]]:
-    """Build Chat Completions `tools` from claw-style ToolRegistry."""
+    """Build Chat Completions ``tools`` payload from a ``ToolRegistry``."""
     tools: List[Dict[str, Any]] = []
     # Stable ordering matters for cache-prefix reuse (e.g. DeepSeek KV cache).
     # Sort by tool name so plugin load order does not perturb the tools schema.
@@ -427,10 +429,11 @@ import os
 import re
 from typing import Any, Dict, List, Optional
 
+from seed.core import env_access as _ea
 from seed.core.llm_exec import LLMAPIExecutor
 
 _COMPACT_BLOCK = re.compile(
-    r"\n<<<CODEAGENT_COMPACT>>>\n.*?\n<<<END_CODEAGENT_COMPACT>>>\n",
+    r"\n<<<(?:SEED_COMPACT|CODEAGENT_COMPACT)>>>\n.*?\n<<<END_(?:SEED_COMPACT|CODEAGENT_COMPACT)>>>\n",
     re.DOTALL,
 )
 
@@ -574,7 +577,7 @@ def strip_compact_block_from_system(system_text: str) -> str:
 
 
 def _context_compact_enabled() -> bool:
-    return os.environ.get("CODEAGENT_CONTEXT_COMPACT", "").lower() in (
+    return _ea.pick_default("", *_ea.CONTEXT_COMPACT).lower() in (
         "1",
         "true",
         "yes",
@@ -612,14 +615,14 @@ def _format_transcript_for_summary(chunks: List[Dict[str, Any]], max_chars: int)
 
 
 def _summarizer_llm(fallback: LLMAPIExecutor) -> LLMAPIExecutor:
-    """If CODEAGENT_CONTEXT_COMPACT_SUMMARIZER_BASEURL/MODEL are set, create a
+    """If ``SEED_CONTEXT_COMPACT_SUMMARIZER_*`` (alias ``CODEAGENT_*``) are set, create a
     dedicated summarizer executor; otherwise return the fallback (main LLM).
 
     Inherits API key and auth scheme from the main LLM (fallback) so the
-    summarizer can authenticate even when ``CODEAGENT_LLM_API_KEY`` is not set
+    summarizer can authenticate even when ``SEED_LLM_API_KEY`` is not set
     as an environment variable (e.g. credentials come from a preset)."""
-    url = os.environ.get("CODEAGENT_CONTEXT_COMPACT_SUMMARIZER_BASEURL", "").strip()
-    mod = os.environ.get("CODEAGENT_CONTEXT_COMPACT_SUMMARIZER_MODEL", "").strip()
+    url = _ea.pick_nonempty(*_ea.CONTEXT_COMPACT_SUMMARIZER_BASEURL)
+    mod = _ea.pick_nonempty(*_ea.CONTEXT_COMPACT_SUMMARIZER_MODEL)
     if url and mod:
         from seed.core.llm_exec import get_llm_executor
 
@@ -640,7 +643,7 @@ import os
 
 def default_system_prompt() -> str:
     """Explicit env override, else config plane (if resolvable), else built-in default."""
-    explicit = (os.environ.get("SEED_SYSTEM_PROMPT") or os.environ.get("CODEAGENT_SYSTEM_PROMPT") or "")
+    explicit = _ea.pick_nonempty(*_ea.SYSTEM_PROMPT)
     if explicit.strip():
         return explicit.strip()
     try:
@@ -660,9 +663,7 @@ def default_system_prompt() -> str:
                     text = ""
                 if text:
                     max_chars = int(
-                        os.environ.get("SEED_PERSONA_MEMORY_MAX_CHARS")
-                        or os.environ.get("CODEAGENT_PERSONA_MEMORY_MAX_CHARS")
-                        or "4000"
+                        _ea.pick_nonempty(*_ea.PERSONA_MEMORY_MAX_CHARS) or "4000"
                     )
                     max_chars = max(200, min(max_chars, 50_000))
                     if len(text) > max_chars:
@@ -702,14 +703,14 @@ def maybe_compact_context_messages(
     ``MIN_BYTES`` or ``MIN_ROUNDS``), summarize older turns into the system prompt and
     drop older raw messages — keeps the last ``KEEP_USER_ROUNDS`` (default 3) verbatim.
 
-    Env:
-      CODEAGENT_CONTEXT_COMPACT=1
-      CODEAGENT_CONTEXT_COMPACT_MIN_BYTES      (default 90000) — body JSON byte threshold
-      CODEAGENT_CONTEXT_COMPACT_MIN_ROUNDS      (default 0, disabled) — user-round trigger
-      CODEAGENT_CONTEXT_COMPACT_KEEP_USER_ROUNDS (default 3) — full turns to preserve
-      CODEAGENT_CONTEXT_COMPACT_SUMMARIZER_BASEURL — dedicated summarizer URL (optional)
-      CODEAGENT_CONTEXT_COMPACT_SUMMARIZER_MODEL   — dedicated summarizer model (optional)
-      CODEAGENT_CONTEXT_SUMMARIZER_MAX_INPUT     (default 120000) — cap for summarizer input chars
+    Env (``CODEAGENT_*`` aliases still honored):
+      SEED_CONTEXT_COMPACT=1
+      SEED_CONTEXT_COMPACT_MIN_BYTES      (default 90000) — body JSON byte threshold
+      SEED_CONTEXT_COMPACT_MIN_ROUNDS      (default 0, disabled) — user-round trigger
+      SEED_CONTEXT_COMPACT_KEEP_USER_ROUNDS (default 3) — full turns to preserve
+      SEED_CONTEXT_COMPACT_SUMMARIZER_BASEURL — dedicated summarizer URL (optional)
+      SEED_CONTEXT_COMPACT_SUMMARIZER_MODEL   — dedicated summarizer model (optional)
+      SEED_CONTEXT_SUMMARIZER_MAX_INPUT     (default 120000) — cap for summarizer input chars
     """
     if not _context_compact_enabled():
         return
@@ -720,16 +721,16 @@ def maybe_compact_context_messages(
     if body_start and len(messages) < 3:
         return
 
-    min_bytes = int(os.environ.get("CODEAGENT_CONTEXT_COMPACT_MIN_BYTES", "90000"))
-    min_rounds = int(os.environ.get("CODEAGENT_CONTEXT_COMPACT_MIN_ROUNDS", "0") or 0)
-    keep_rounds = int(os.environ.get("CODEAGENT_CONTEXT_COMPACT_KEEP_USER_ROUNDS", "3"))
-    max_in = int(os.environ.get("CODEAGENT_CONTEXT_SUMMARIZER_MAX_INPUT", "120000"))
+    min_bytes = int(_ea.pick_default("90000", *_ea.CONTEXT_COMPACT_MIN_BYTES))
+    min_rounds = int(_ea.pick_default("0", *_ea.CONTEXT_COMPACT_MIN_ROUNDS) or 0)
+    keep_rounds = int(_ea.pick_default("3", *_ea.CONTEXT_COMPACT_KEEP_USER_ROUNDS))
+    max_in = int(_ea.pick_default("120000", *_ea.CONTEXT_SUMMARIZER_MAX_INPUT))
     if keep_rounds < 1:
         return
 
     cur_bytes = _messages_body_json_bytes(messages, body_start)
     try:
-        warn_ratio = float(os.environ.get("CODEAGENT_CONTEXT_COMPACT_WARN_RATIO", "0.85") or 0.85)
+        warn_ratio = float(_ea.pick_default("0.85", *_ea.CONTEXT_COMPACT_WARN_RATIO) or 0.85)
     except Exception:
         warn_ratio = 0.85
     warn_ratio = max(0.1, min(warn_ratio, 0.99))
@@ -806,10 +807,10 @@ def maybe_compact_context_messages(
     sys_msg = messages[0]
     base = strip_compact_block_from_system(str(sys_msg.get("content") or ""))
     block = (
-        "\n\n<<<CODEAGENT_COMPACT>>>\n"
+        "\n\n<<<SEED_COMPACT>>>\n"
         "## Earlier conversation (compressed)\n"
         f"{summary}\n"
-        "<<<END_CODEAGENT_COMPACT>>>\n"
+        "<<<END_SEED_COMPACT>>>\n"
     )
     sys_msg["content"] = base + block
     messages[:] = [sys_msg] + recent
@@ -831,7 +832,7 @@ def maybe_compact_context_messages(
 
 
 def _truncate_tool_output(text: str) -> str:
-    max_c = int(os.environ.get("CODEAGENT_TOOL_OUTPUT_MAX_CHARS", "48000"))
+    max_c = int(_ea.pick_default("48000", *_ea.TOOL_OUTPUT_MAX_CHARS))
     if max_c <= 0 or len(text) <= max_c:
         return text
     drop = len(text) - max_c
@@ -905,6 +906,7 @@ async def run_llm_tool_loop(
     on_round_persist: Optional[Callable[[List[Dict[str, str]], List[str]], None]] = None,
     on_text_delta: Optional[Callable[[str], None]] = None,
     on_reasoning_delta: Optional[Callable[[str], None]] = None,
+    on_check_pending_messages: Optional[Callable[[], List[Dict[str, Any]]]] = None,
 ) -> Tuple[str, Dict[str, Any], List[str], List[Dict[str, str]], Dict[str, Any]]:
     tools_used: List[str] = []
     tool_trace: List[Dict[str, str]] = []
@@ -917,6 +919,33 @@ async def run_llm_tool_loop(
 
     for round_i in range(max(1, int(max_tool_rounds))):
         loop_meta["rounds"] = round_i + 1
+
+        # ── 停止信号检查 ──
+        if is_chat_cancelled():
+            loop_meta["stopped_reason"] = "cancelled"
+            reply = ""
+            for m in reversed(messages):
+                if isinstance(m, dict) and m.get("role") == "assistant":
+                    c = m.get("content")
+                    reply = c if isinstance(c, str) else str(c or "")
+                    break
+            return reply, last_meta, tools_used, tool_trace, loop_meta
+
+        # ── 运行时消息注入：第二个用户消息在工具链中间到达 ──
+        if on_check_pending_messages:
+            try:
+                pending = on_check_pending_messages()
+                if pending:
+                    messages.extend(pending)
+            except Exception:
+                logger.exception("check_pending_messages failed")
+            reply = ""
+            for m in reversed(messages):
+                if isinstance(m, dict) and m.get("role") == "assistant":
+                    c = m.get("content")
+                    reply = c if isinstance(c, str) else str(c or "")
+                    break
+            return reply, last_meta, tools_used, tool_trace, loop_meta
 
         # --- Streaming LLM round (per-token) ---
         content, tool_calls, meta = await asyncio.to_thread(
@@ -1038,6 +1067,7 @@ import re
 import uuid
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from seed.core import env_access as _ea
 from seed.core.tool_runtime import ToolRegistry
 
 _TOOL_CALL_WRAPPER_RE = re.compile(
@@ -1203,7 +1233,7 @@ def _strip_json_fences_once_each(text: str, fences: List[str]) -> str:
 
 
 def _inline_tool_parse_enabled() -> bool:
-    return os.environ.get("CODEAGENT_INLINE_TOOL_PARSE", "1").lower() not in (
+    return _ea.pick_default("1", *_ea.INLINE_TOOL_PARSE).lower() not in (
         "0",
         "false",
         "no",

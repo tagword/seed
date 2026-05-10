@@ -4,15 +4,15 @@ from contextvars import ContextVar, Token
 from typing import Any, Callable, Dict, Optional
 
 _EMITTER: ContextVar[Optional[Callable[[Dict[str, Any]], None]]] = ContextVar(
-    "codeagent_chat_event_emitter",
+    "seed_chat_event_emitter",
     default=None,
 )
 _CURRENT_TOOL: ContextVar[Optional[Dict[str, Any]]] = ContextVar(
-    "codeagent_current_tool_context",
+    "seed_current_tool_context",
     default=None,
 )
 _CANCEL_CHECKER: ContextVar[Optional[Callable[[], bool]]] = ContextVar(
-    "codeagent_chat_cancel_checker",
+    "seed_chat_cancel_checker",
     default=None,
 )
 

@@ -13,7 +13,6 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from seed.core.config_plane import project_root
 from seed.core.models import Session
 from seed.core.paths import agent_home, agent_id_default, agent_project_data_subdir
 from seed.core.proj_reg import list_projects
@@ -22,52 +21,20 @@ from seed.core.sess_store import SessionStore
 _SAFE_RE = re.compile(r"[^a-zA-Z0-9._-]+")
 
 
-def _legacy_llm_sessions_dir() -> Path:
-    return (project_root() / "llm_sessions").resolve()
-
-
 def llm_sessions_dir(agent_id: Optional[str] = None) -> Path:
     """
     LLM session storage directory (default, for non-project sessions).
 
     Priority:
-    - SEED_LLM_SESSIONS_DIR / CODEAGENT_LLM_SESSIONS_DIR (explicit override)
-    - <project_root>/agents/<agent_id>/sessions/llm_sessions (multi-agent layout; always used)
-
-    On first access, if legacy ``<project_root>/llm_sessions`` exists and the new agent
-    directory is empty, we best-effort migrate ``*.json`` into the agent directory.
+    - ``SEED_LLM_SESSIONS_DIR`` (explicit override)
+    - ``agents/<agent_id>/sessions/llm_sessions`` under the multi-agent layout.
     """
-    raw = (
-        os.environ.get("SEED_LLM_SESSIONS_DIR", "").strip()
-        or os.environ.get("CODEAGENT_LLM_SESSIONS_DIR", "").strip()
-    )
+    raw = os.environ.get("SEED_LLM_SESSIONS_DIR", "").strip()
     if raw:
         return Path(raw).expanduser().resolve()
     aid = (agent_id or "").strip() or agent_id_default()
     d = (agent_home(aid) / "sessions" / "llm_sessions").resolve()
-    try:
-        d.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        # If we cannot create it, fall back to legacy as last resort.
-        return _legacy_llm_sessions_dir()
-
-    legacy = _legacy_llm_sessions_dir()
-    try:
-        if legacy.is_dir():
-            legacy_json = sorted(legacy.glob("*.json"))
-            # Only migrate when the agent dir has no sessions yet (avoid mixing).
-            if legacy_json and not any(d.glob("*.json")):
-                for p in legacy_json:
-                    try:
-                        target = d / p.name
-                        if target.exists():
-                            continue
-                        p.replace(target)
-                    except OSError:
-                        # Best-effort: ignore individual file move errors.
-                        pass
-    except OSError:
-        pass
+    d.mkdir(parents=True, exist_ok=True)
     return d
 
 
@@ -180,20 +147,7 @@ def _try_load_from_store(store: SessionStore, handle: str) -> Optional[Session]:
     if data.get("id") and all(isinstance(m, dict) for m in msgs):
         return _session_from_stored_json(data, slug, handle)
 
-    sid = data.get("session_id") or handle
-    raw_ts = data.get("updated_at") or ""
-    dict_msgs = [m for m in msgs if isinstance(m, dict)]
-    dict_msgs = _scrub_history_for_model(dict_msgs)
-    return Session(
-        id=slug,
-        name=sid if isinstance(sid, str) else handle,
-        created_at=str(raw_ts),
-        updated_at=str(raw_ts),
-        messages=list(dict_msgs),
-        turns=[],
-        config={"kind": "llm_chat", "migrated_from": "legacy_messages_only"},
-        metadata={},
-    )
+    return None
 
 
 def load_chat_session_from_disk(
@@ -330,7 +284,7 @@ def list_stored_llm_sessions_meta(
                 filter_by_project=True, filter_project_id="",
             )
 
-    # 不按项目过滤 → 合并默认目录 + 所有项目目录
+    # No project filter: include default session dir and every project session dir.
     rows: List[Dict[str, Any]] = []
 
     # 1. 默认目录

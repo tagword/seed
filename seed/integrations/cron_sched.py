@@ -1,20 +1,20 @@
 """
 Optional scheduled agent turns (cron).
 
-Config: ``<CODEAGENT_PROJECT_ROOT>/config/codeagent.cron.json``
-Copy from ``config/codeagent.cron.example.json`` in the repo.
+Config: ``<project_root>/config/seed.cron.json`` (legacy ``codeagent.cron.json`` is still read if present).
 
-Disable entirely: ``CODEAGENT_CRON=0`` (or ``false`` / ``no`` / ``off``).
-Requires APScheduler: ``pip install 'codeagent[server]'`` or ``pip install apscheduler``.
+Disable entirely: ``SEED_CRON=0`` (alias ``CODEAGENT_CRON``; or ``false`` / ``no`` / ``off``).
+Requires APScheduler: ``pip install apscheduler``.
 """
 from __future__ import annotations
 
 
 import json
 import logging
-import os
 from pathlib import Path
 from typing import Any, Dict, List
+
+from seed.core import env_access as _ea
 
 logger = logging.getLogger(__name__)
 
@@ -90,14 +90,38 @@ def _cron_outcome_matches_latest(
     return False
 
 
-def cron_config_path() -> Path:
+CRON_JSON = "seed.cron.json"
+LEGACY_CRON_JSON = "codeagent.cron.json"
+
+
+def cron_config_canonical_path() -> Path:
+    """Path used for new writes (always ``seed.cron.json``)."""
     from seed.core.config_plane import project_root
 
-    return project_root() / "config" / "codeagent.cron.json"
+    return project_root() / "config" / CRON_JSON
+
+
+def cron_config_resolved_path() -> Path:
+    """Active config path: prefer ``seed.cron.json``, else legacy ``codeagent.cron.json``."""
+    from seed.core.config_plane import project_root
+
+    cfg = project_root() / "config"
+    seed_p = cfg / CRON_JSON
+    leg = cfg / LEGACY_CRON_JSON
+    if seed_p.is_file():
+        return seed_p
+    if leg.is_file():
+        return leg
+    return seed_p
+
+
+def cron_config_path() -> Path:
+    """Alias for :func:`cron_config_canonical_path` (writes go here)."""
+    return cron_config_canonical_path()
 
 
 def load_cron_config() -> Dict[str, Any]:
-    p = cron_config_path()
+    p = cron_config_resolved_path()
     if not p.is_file():
         return {"enabled": False, "jobs": []}
     try:
@@ -116,7 +140,7 @@ def load_cron_config() -> Dict[str, Any]:
 def cron_job_id_is_active(jid: str) -> bool:
     """Whether this job id is listed in the UI and registered with APScheduler.
 
-    Empty ids are inactive. Ids that are *only* underscores (e.g. legacy Web UI
+    Empty ids are inactive. Ids that are *only* underscores (e.g. placeholder
     slugs from pure non-ASCII names) are inactive. An id like ``_backup`` stays
     active because it contains alphanumeric characters.
     """
@@ -130,7 +154,7 @@ def cron_job_id_is_active(jid: str) -> bool:
 
 
 def _cron_disabled_by_env() -> bool:
-    return os.environ.get("CODEAGENT_CRON", "1").lower() in (
+    return _ea.pick_default("1", *_ea.CRON).lower() in (
         "0",
         "false",
         "no",
@@ -138,15 +162,10 @@ def _cron_disabled_by_env() -> bool:
     )
 
 
-def _tools_for_agent(aid: str):
-    try:
-        from codeagent.tools.agent_tools import get_tools_for_agent
+def _tools_for_agent(_aid: str):
+    from seed_tools import setup_builtin_tools
 
-        return get_tools_for_agent(aid)
-    except Exception:
-        from seed_tools import setup_builtin_tools
-
-        return setup_builtin_tools()
+    return setup_builtin_tools()
 
 
 
@@ -156,7 +175,6 @@ def _tools_for_agent(aid: str):
 import asyncio
 import json
 import logging
-import os
 from typing import Any, Dict, List, Optional
 
 
@@ -166,8 +184,209 @@ _scheduler: Optional[Any] = None
 
 
 async def _run_cron_job_async(job: Dict[str, Any]) -> None:
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, run_cron_job_sync, job)
+    """Execute one cron job fully async — shares the main event loop (no asyncio.run)."""
+    import asyncio
+    from seed.core._session_cache import SESSIONS, _memkey
+
+    if not job.get("enabled", True):
+        return
+    jid = (str(job.get("id") or "").strip() or "cron-job")
+    agent_id = (str(job.get("agent_id") or "").strip() or "default")
+    sid = (str(job.get("session_id") or "").strip() or f"cron-{jid}")
+    prompt = (str(job.get("prompt") or "")).strip()
+    if not prompt:
+        logger.warning("cron job %s: empty prompt, skip", jid)
+        return
+    try:
+        max_rounds = int(job.get("max_tool_rounds") or 12)
+    except (TypeError, ValueError):
+        max_rounds = 12
+    max_rounds = max(1, min(max_rounds, 32))
+
+    try:
+        from seed.core.paths import ensure_agent_dirs
+        await asyncio.to_thread(ensure_agent_dirs, agent_id)
+    except Exception:
+        pass
+
+    project_id = (str(job.get("project_id") or "")).strip() or ""
+    mkey = _memkey(agent_id, sid)
+    from seed.core.llm_sess import (
+        load_or_create_chat_session,
+        merge_fresh_system,
+        persist_chat_session,
+    )
+    from seed.core.agent_runtime import (
+        build_api_projection_messages,
+        default_system_prompt,
+        maybe_compact_context_messages,
+        merge_llm_tail_into_full,
+        run_llm_tool_loop,
+    )
+    from seed.core.agent_context import clear_active_project_episodic, set_active_llm_session
+    from seed.core.llm_exec import LLMError
+    from seed.core.mem_bridge import apply_episodic_to_messages
+    from seed.core.mem_sys import MemorySystem
+    from seed.core.config_plane import project_root
+    from seed.core.llm_presets import llm_executor_from_resolved, resolve_preset
+    from seed.integrations.transcript_store import append_transcript_entries
+
+    if mkey in SESSIONS:
+        chat_sess = SESSIONS[mkey]
+    else:
+        chat_sess = await asyncio.to_thread(
+            load_or_create_chat_session, sid, agent_id, project_id=project_id
+        )
+
+    # 将 cron 会话关联到项目（如果有），并标记频道
+    if not isinstance(chat_sess.metadata, dict):
+        chat_sess.metadata = {}
+    if project_id:
+        chat_sess.metadata["project_id"] = project_id
+    chat_sess.metadata["channel"] = "Cron"
+    chat_sess.metadata["source"] = f"cron:{jid}"
+
+    fresh = default_system_prompt()
+    import hashlib
+
+    cur_hash = hashlib.sha256((fresh or "").encode("utf-8")).hexdigest()
+    if not isinstance(chat_sess.metadata, dict):
+        chat_sess.metadata = {}
+    prev_hash = str(chat_sess.metadata.get("system_hash") or "").strip()
+    if not chat_sess.messages:
+        chat_sess.messages = [{"role": "system", "content": fresh}]
+    else:
+        if (not prev_hash) or (prev_hash != cur_hash):
+            chat_sess.messages[:] = merge_fresh_system(chat_sess.messages, fresh)
+        else:
+            try:
+                keep = str(chat_sess.messages[0].get("content") or "")
+            except Exception:
+                keep = ""
+            chat_sess.messages[:] = merge_fresh_system(chat_sess.messages, keep)
+    chat_sess.metadata["system_hash"] = cur_hash
+
+    cron_line = f"[cron:{jid}] {prompt}"
+    chat_sess.messages.append(
+        {
+            "role": "user",
+            "content": cron_line,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    try:
+        await asyncio.to_thread(
+            append_transcript_entries, sid, [chat_sess.messages[-1]], agent_id=agent_id
+        )
+    except Exception:
+        pass
+    max_hist = int(_ea.pick_default("12", *_ea.CHAT_USER_ROUNDS))
+
+    # Resolve LLM config from presets / env
+    llm = llm_executor_from_resolved(resolve_preset(None))
+    # run_in_executor for the env reads (resolve_preset may read files)
+    set_active_llm_session(mkey)
+    tools_used: List[str] = []
+    tool_trace: List[Dict[str, str]] = []
+    try:
+        api_msgs = build_api_projection_messages(
+            chat_sess.messages,
+            max_user_rounds=max_hist,
+            skills_suffix=None,
+        )
+        maybe_compact_context_messages(api_msgs, llm)
+        try:
+            from seed.core.paths import agent_memory_dir
+
+            await asyncio.to_thread(
+                apply_episodic_to_messages,
+                api_msgs,
+                agent_memory_dir(agent_id),
+                sid,
+                False,
+            )
+        except Exception:
+            await asyncio.to_thread(
+                apply_episodic_to_messages, api_msgs, project_root(), sid, False
+            )
+        reg, exe = _tools_for_agent(agent_id)
+        n_before = len(api_msgs)
+        # run_llm_tool_loop is already async — await directly
+        reply, _, tools_used, tool_trace, _loop_meta = await run_llm_tool_loop(
+            llm,
+            exe,
+            messages=api_msgs,
+            registry=reg,
+            max_tool_rounds=max_rounds,
+        )
+        tail = merge_llm_tail_into_full(chat_sess.messages, api_msgs, n_before)
+        try:
+            if tail:
+                await asyncio.to_thread(
+                    append_transcript_entries, sid, tail, agent_id=agent_id
+                )
+        except Exception:
+            pass
+        try:
+            await asyncio.to_thread(persist_chat_session, chat_sess, agent_id)
+        except Exception:
+            logger.exception("cron persist failed job=%s", jid)
+        SESSIONS[mkey] = chat_sess
+        if _ea.pick_default("1", *_ea.MEMORY_LOG).lower() not in ("0", "false", "no"):
+            try:
+                from seed.core.paths import agent_memory_dir
+
+                def _log_cron_experience():
+                    mem = MemorySystem(base_path=agent_memory_dir(agent_id))
+                    outcome = (reply or "")[:2000]
+                    skip_dup = _ea.pick_default(
+                        "", *_ea.CRON_EXPERIENCE_SKIP_DUPLICATE
+                    ).lower() in ("1", "true", "yes", "on")
+                    if skip_dup and _cron_outcome_matches_latest(
+                        mem, job_id=jid, session_id=sid, new_outcome=outcome
+                    ):
+                        logger.info(
+                            "cron job id=%s: skip experience log (outcome unchanged vs latest for session=%s)",
+                            jid,
+                            sid,
+                        )
+                        return
+                    ttl_raw = _ea.pick_nonempty(*_ea.CRON_EXPERIENCE_TTL_SECONDS)
+                    ttl_val = int(ttl_raw) if ttl_raw.isdigit() else None
+                    mem.log_experience(
+                        task_id=f"cron-{jid}-{datetime.now(timezone.utc).isoformat()}",
+                        outcome=outcome,
+                        tools_used=tools_used,
+                        session_id=sid,
+                        ttl_seconds=ttl_val,
+                    )
+
+                await asyncio.to_thread(_log_cron_experience)
+            except Exception:
+                pass
+        logger.info(
+            "cron job done id=%s agent=%s session=%s tools=%s trace_len=%s",
+            jid,
+            agent_id,
+            sid,
+            ",".join(tools_used) if tools_used else "(none)",
+            len(tool_trace),
+        )
+    except LLMError as e:
+        logger.warning("cron job LLM error id=%s: %s", jid, e)
+        try:
+            chat_sess.messages.pop()
+        except Exception:
+            pass
+    except Exception:
+        logger.exception("cron job crashed id=%s", jid)
+        try:
+            chat_sess.messages.pop()
+        except Exception:
+            pass
+    finally:
+        clear_active_project_episodic()
+        set_active_llm_session(None)
 
 
 def start_cron_scheduler() -> None:
@@ -176,12 +395,12 @@ def start_cron_scheduler() -> None:
     if _scheduler is not None:
         return
     if _cron_disabled_by_env():
-        logger.info("cron: disabled (CODEAGENT_CRON)")
+        logger.info("cron: disabled (SEED_CRON / CODEAGENT_CRON)")
         return
 
     cfg = load_cron_config()
     if not cfg.get("enabled"):
-        logger.info("cron: config disabled or missing (see config/codeagent.cron.json)")
+        logger.info("cron: config disabled or missing (see config/%s)", CRON_JSON)
         return
 
     jobs: List[Dict[str, Any]] = [j for j in cfg.get("jobs") or [] if isinstance(j, dict)]
@@ -210,12 +429,12 @@ def start_cron_scheduler() -> None:
     except ImportError:
         logger.warning(
             "cron: APScheduler not installed; scheduled jobs will not run. "
-            "Install with: pip install 'codeagent[server]'   or   pip install apscheduler"
+            "Install with: pip install apscheduler"
         )
         return
 
     sched = AsyncIOScheduler()
-    default_tz = os.environ.get("CODEAGENT_CRON_TZ", "UTC").strip() or "UTC"
+    default_tz = _ea.pick_default("UTC", *_ea.CRON_TZ).strip() or "UTC"
 
     for job in jobs:
         if not job.get("enabled", True):
@@ -270,7 +489,7 @@ def shutdown_cron_scheduler() -> None:
 
 
 def reload_cron_scheduler() -> None:
-    """Re-read ``codeagent.cron.json`` and rebuild APScheduler jobs (no full process restart)."""
+    """Re-read cron JSON (``seed.cron.json`` or legacy ``codeagent.cron.json``) and rebuild APScheduler."""
     shutdown_cron_scheduler()
     start_cron_scheduler()
 
@@ -397,7 +616,6 @@ def cron_status_for_ui() -> Dict[str, Any]:
 
 import asyncio
 import logging
-import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
@@ -497,7 +715,7 @@ def run_cron_job_sync(job: Dict[str, Any]) -> None:
         append_transcript_entries(sid, [chat_sess.messages[-1]], agent_id=agent_id)
     except Exception:
         pass
-    max_hist = int(os.environ.get("CODEAGENT_CHAT_USER_ROUNDS", "12"))
+    max_hist = int(_ea.pick_default("12", *_ea.CHAT_USER_ROUNDS))
 
     # Resolve LLM config from presets / env (see resolve_preset)
     llm = llm_executor_from_resolved(resolve_preset(None))
@@ -548,13 +766,13 @@ def run_cron_job_sync(job: Dict[str, Any]) -> None:
         except Exception:
             logger.exception("cron persist failed job=%s", jid)
         SESSIONS[mkey] = chat_sess
-        if os.environ.get("CODEAGENT_MEMORY_LOG", "1").lower() not in ("0", "false", "no"):
+        if _ea.pick_default("1", *_ea.MEMORY_LOG).lower() not in ("0", "false", "no"):
             try:
                 from seed.core.paths import agent_memory_dir
 
                 mem = MemorySystem(base_path=agent_memory_dir(agent_id))
                 outcome = (reply or "")[:2000]
-                skip_dup = os.environ.get("CODEAGENT_CRON_EXPERIENCE_SKIP_DUPLICATE", "").lower() in (
+                skip_dup = _ea.pick_default("", *_ea.CRON_EXPERIENCE_SKIP_DUPLICATE).lower() in (
                     "1",
                     "true",
                     "yes",
@@ -569,7 +787,7 @@ def run_cron_job_sync(job: Dict[str, Any]) -> None:
                         sid,
                     )
                 else:
-                    ttl_raw = os.environ.get("CODEAGENT_CRON_EXPERIENCE_TTL_SECONDS", "").strip()
+                    ttl_raw = _ea.pick_nonempty(*_ea.CRON_EXPERIENCE_TTL_SECONDS)
                     ttl_val = int(ttl_raw) if ttl_raw.isdigit() else None
                     mem.log_experience(
                         task_id=f"cron-{jid}-{datetime.now(timezone.utc).isoformat()}",

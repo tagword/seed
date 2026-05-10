@@ -6,10 +6,10 @@ trim/compact apply only to a deep-copied list sent to the LLM.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from seed.core import env_access as _ea
 from seed.core.llm_sess import _safe_session_filename, llm_sessions_dir
 
 
@@ -28,7 +28,7 @@ def append_transcript_entries(
     agent_id: Optional[str] = None,
 ) -> None:
     """Append each message dict as one JSON line (best-effort)."""
-    if os.environ.get("CODEAGENT_TRANSCRIPT", "1").lower() in ("0", "false", "no"):
+    if _ea.pick_default("1", *_ea.TRANSCRIPT).lower() in ("0", "false", "no"):
         return
     if not entries:
         return

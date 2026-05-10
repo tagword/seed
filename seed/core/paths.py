@@ -10,9 +10,11 @@ import os
 from pathlib import Path
 from typing import Optional
 
+from seed.core.env_access import AGENT_ID, pick_nonempty
+
 
 def agent_id_default() -> str:
-    raw = (os.environ.get("SEED_AGENT_ID", "") or os.environ.get("CODEAGENT_AGENT_ID", "") or "").strip()
+    raw = pick_nonempty(*AGENT_ID)
     return raw or "default"
 
 

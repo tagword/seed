@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 import threading
 import time
 from typing import Any, Dict, Optional, Tuple
+
+from seed.core import env_access as _ea
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +67,7 @@ def compute_webhook_dedup_key(data: Dict[str, Any], raw_body: bytes) -> str:
 
 
 def _dedup_ttl_sec() -> float:
-    raw = os.environ.get("CODEAGENT_WEBHOOK_DEDUP_TTL_SEC", "86400").strip()
+    raw = _ea.pick_default("86400", *_ea.WEBHOOK_DEDUP_TTL_SEC).strip()
     try:
         v = float(raw)
     except ValueError:
@@ -75,7 +76,7 @@ def _dedup_ttl_sec() -> float:
 
 
 def _dedup_max_keys() -> int:
-    raw = os.environ.get("CODEAGENT_WEBHOOK_DEDUP_MAX_KEYS", "20000").strip()
+    raw = _ea.pick_default("20000", *_ea.WEBHOOK_DEDUP_MAX_KEYS).strip()
     try:
         n = int(raw)
     except ValueError:
@@ -84,7 +85,7 @@ def _dedup_max_keys() -> int:
 
 
 def dedup_enabled() -> bool:
-    return os.environ.get("CODEAGENT_WEBHOOK_DEDUP", "1").lower() not in (
+    return _ea.pick_default("1", *_ea.WEBHOOK_DEDUP).lower() not in (
         "0",
         "false",
         "no",

@@ -32,7 +32,7 @@ from seed.core.llm_sess import (
     persist_chat_session,
 )
 from seed.core.mem_sys import MemorySystem, MemorySystemError
-from seed.core.safety import (
+from seed.integrations.safety import (
     check_bash_command,
     enforce_bash_timeout,
     sanitize_assistant_output,

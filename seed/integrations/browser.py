@@ -13,6 +13,8 @@ import os
 import socket
 from typing import Any, Dict, List
 
+from seed.core import env_access as _ea
+
 
 class BrowserError(RuntimeError):
     pass
@@ -46,10 +48,6 @@ def _runtime_evaluate_value(res: Dict[str, Any]) -> Any:
     if "value" in outer:
         return outer["value"]
     return outer
-
-
-def _env_truthy(name: str, default: str = "0") -> bool:
-    return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
 
 
 def _is_localhost_host(host: str) -> bool:
@@ -324,8 +322,8 @@ class BrowserMixinTargets:
 
     async def _target_enable(self, c: _WsClient, method: str, *, timeout: float = 10.0) -> None:
         raw_thr = (
-            os.environ.get("CODEAGENT_BROWSER_UNHEALTHY_THRESHOLD")
-            or os.environ.get("CODEAGENT_BROWSER_CDP_UNHEALTHY_THRESHOLD")
+            _ea.pick_nonempty(*_ea.BROWSER_UNHEALTHY_THRESHOLD)
+            or _ea.pick_nonempty(*_ea.BROWSER_CDP_UNHEALTHY_THRESHOLD)
             or "2"
         )
         threshold = int(raw_thr or "2")
@@ -501,15 +499,13 @@ from urllib.parse import urlparse
 
 
 def _allow_remote_debug() -> bool:
-    return _env_truthy("CODEAGENT_BROWSER_ALLOW_REMOTE_DEBUG", "0") or _env_truthy(
-        "CODEAGENT_BROWSER_ALLOW_REMOTE_CDP", "0"
-    )
+    return _ea.env_truthy(*_ea.BROWSER_ALLOW_REMOTE_DEBUG, default="0")
 
 
 def assert_safe_debug_baseurl(baseurl: str) -> str:
     """
     Only allow connecting to localhost remote-debugging endpoints by default.
-    Override with CODEAGENT_BROWSER_ALLOW_REMOTE_DEBUG=1 (legacy: CODEAGENT_BROWSER_ALLOW_REMOTE_CDP=1).
+    Override with SEED_BROWSER_ALLOW_REMOTE_DEBUG=1 (alias CODEAGENT_*).
     """
     u = (baseurl or "").strip()
     if not u:
@@ -527,8 +523,7 @@ def assert_safe_debug_baseurl(baseurl: str) -> str:
     if ips and all(ipaddress.ip_address(x).is_loopback for x in ips if x):
         return u.rstrip("/")
     raise BrowserError(
-        "Refuse non-local debug endpoint. Set CODEAGENT_BROWSER_ALLOW_REMOTE_DEBUG=1 to override "
-        "(legacy: CODEAGENT_BROWSER_ALLOW_REMOTE_CDP=1)."
+        "Refuse non-local debug endpoint. Set SEED_BROWSER_ALLOW_REMOTE_DEBUG=1 to override."
     )
 
 
@@ -536,7 +531,7 @@ def assert_safe_navigate_url(url: str) -> str:
     """
     Basic SSRF guard for navigation.
     Default: block private / loopback / link-local hosts; allow only http/https.
-    Override with CODEAGENT_BROWSER_ALLOW_PRIVATE_URLS=1.
+    Override with SEED_BROWSER_ALLOW_PRIVATE_URLS=1 (alias CODEAGENT_*).
     """
     u = (url or "").strip()
     if not u:
@@ -549,7 +544,7 @@ def assert_safe_navigate_url(url: str) -> str:
     host = (p.hostname or "").strip()
     if not host:
         raise BrowserError("url missing hostname")
-    if _env_truthy("CODEAGENT_BROWSER_ALLOW_PRIVATE_URLS", "0"):
+    if _ea.env_truthy(*_ea.BROWSER_ALLOW_PRIVATE_URLS, default="0"):
         return u
     try:
         ipaddress.ip_address(host)

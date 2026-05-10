@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from typing import Optional
 
+from seed.core import env_access as _ea
+
 
 class LLMAPIExecutor:
     """
@@ -37,17 +39,15 @@ class LLMAPIExecutor:
         self.topP = topP
         self.topK = topK
         self.api_key = (
-            api_key
-            if api_key is not None
-            else os.environ.get("CODEAGENT_LLM_API_KEY", "").strip()
+            api_key if api_key is not None else _ea.pick_nonempty(*_ea.LLM_API_KEY)
         )
         self.auth_scheme = (
             auth_scheme
             if auth_scheme is not None
-            else os.environ.get("CODEAGENT_LLM_AUTH_SCHEME", "Bearer").strip() or "Bearer"
+            else (_ea.pick_nonempty(*_ea.LLM_AUTH_SCHEME) or "Bearer")
         )
         self.maxOutputTokens = int(
-            os.environ.get("CODEAGENT_LLM_MAX_TOKENS", str(maxOutputTokens))
+            _ea.pick_default(str(maxOutputTokens), *_ea.LLM_MAX_TOKENS)
         )
         self.headers = {
             "Content-Type": "application/json"
@@ -59,8 +59,8 @@ class LLMAPIExecutor:
 
         if not (self.baseURL or "").strip():
             raise LLMError(
-                "未配置 LLM API 地址：请在 config/codeagent.env 中设置 CODEAGENT_LLM_BASEURL，"
-                "或在 config/codeagent.models.json 中至少保存一条含 Base URL 与模型的预设"
+                "未配置 LLM API 地址：请在 config/seed.env（或旧版 config/codeagent.env）中设置 SEED_LLM_BASEURL（或别名 CODEAGENT_LLM_BASEURL），"
+                "或在 config/seed.models.json（旧文件名 codeagent.models.json）中至少保存一条含 Base URL 与模型的预设"
                 "（未点「设为默认」时将自动使用列表中的第一条）。"
             )
 
@@ -117,7 +117,7 @@ def generate(
         "temperature": temperature or self.temperature,
         "top_p": self.topP,
     }
-    if not os.environ.get("CODEAGENT_LLM_NO_TOPK"):
+    if not _ea.any_nonempty(*_ea.LLM_NO_TOPK):
         params["top_k"] = self.topK
 
     if tools:
@@ -128,7 +128,7 @@ def generate(
     extra_body: Dict[str, Any] = {}
     # Resolve enable_thinking from caller arg or env.
     if enable_thinking is None:
-        env_val = os.environ.get("CODEAGENT_LLM_ENABLE_THINKING", "1")
+        env_val = _ea.pick_default("1", *_ea.LLM_ENABLE_THINKING)
         resolved_thinking = env_val.lower() not in ("0", "false", "no", "")
     else:
         resolved_thinking = bool(enable_thinking)
@@ -137,18 +137,17 @@ def generate(
         # DeepSeek official API: use native thinking.type, NOT sglang-specific params.
         extra_body["thinking"] = {"type": "enabled" if resolved_thinking else "disabled"}
         if resolved_thinking:
-            effort = os.environ.get("CODEAGENT_LLM_REASONING_EFFORT", "").strip().lower()
+            effort = _ea.pick_default("", *_ea.LLM_REASONING_EFFORT).strip().lower()
             if effort in ("low", "medium", "high", "max"):
                 params["reasoning_effort"] = effort
     else:
         # SGLang / Qwen3: separate_reasoning + chat_template_kwargs.enable_thinking
-        if os.environ.get("CODEAGENT_LLM_SEPARATE_REASONING", "1") != "0":
+        if _ea.pick_default("1", *_ea.LLM_SEPARATE_REASONING) != "0":
             extra_body["separate_reasoning"] = True
-        if os.environ.get("CODEAGENT_LLM_CHAT_TEMPLATE_KWARGS", "1") != "0":
+        if _ea.pick_default("1", *_ea.LLM_CHAT_TEMPLATE_KWARGS) != "0":
             extra_body.setdefault("chat_template_kwargs", {})
             extra_body["chat_template_kwargs"]["enable_thinking"] = resolved_thinking
-    # User-supplied JSON via CODEAGENT_LLM_EXTRA_BODY merges last (wins).
-    user_extra = os.environ.get("CODEAGENT_LLM_EXTRA_BODY", "").strip()
+    user_extra = _ea.pick_nonempty(*_ea.LLM_EXTRA_BODY)
     if user_extra:
         try:
             parsed = json.loads(user_extra)
@@ -159,7 +158,7 @@ def generate(
                 if isinstance(ctk, dict):
                     extra_body.setdefault("chat_template_kwargs", {}).update(ctk)
         except (json.JSONDecodeError, TypeError) as e:
-            logger.warning("CODEAGENT_LLM_EXTRA_BODY invalid JSON, ignored: %s", e)
+            logger.warning("SEED_LLM_EXTRA_BODY invalid JSON, ignored: %s", e)
     # Merge into top-level params (sglang accepts them at the request root).
     for k, v in extra_body.items():
         params.setdefault(k, v)
@@ -169,18 +168,18 @@ def generate(
         maybe_shrink_llm_request_params(params, max_bytes=max_body, base_url=self.baseURL)
 
     # Clamp completion max_tokens using an estimated input budget. Prefer setting
-    # CODEAGENT_LLM_CONTEXT_SIZE to the inference server's *effective* KV token pool
+    # SEED_LLM_CONTEXT_SIZE to the inference server's *effective* KV token pool
     # (e.g. SGLang ``max_total_num_tokens`` minus headroom), not always the model's
     # configured ``context_len`` when VRAM limits the cache.
-    ctx = int(os.environ.get("CODEAGENT_LLM_CONTEXT_SIZE", "262144"))
+    ctx = int(_ea.pick_default("262144", *_ea.LLM_CONTEXT_SIZE))
     if ctx > 0:
         body = json.dumps(
             {"messages": params["messages"], "tools": tools or []},
             ensure_ascii=False,
         )
-        div = int(os.environ.get("CODEAGENT_LLM_INPUT_TOKEN_EST_DIVISOR", "3"))
+        div = int(_ea.pick_default("3", *_ea.LLM_INPUT_TOKEN_EST_DIVISOR))
         est_in = max(1, len(body.encode("utf-8")) // max(div, 1))
-        margin = int(os.environ.get("CODEAGENT_LLM_CONTEXT_MARGIN", "8192"))
+        margin = int(_ea.pick_default("8192", *_ea.LLM_CONTEXT_MARGIN))
         cap = ctx - est_in - margin
         req = int(params.get("max_tokens") or 0)
         if req > 0:
@@ -315,7 +314,7 @@ def generate_stream(
         "top_p": self.topP,
         "stream": True,
     }
-    if not os.environ.get("CODEAGENT_LLM_NO_TOPK"):
+    if not _ea.any_nonempty(*_ea.LLM_NO_TOPK):
         params["top_k"] = self.topK
 
     if tools:
@@ -325,7 +324,7 @@ def generate_stream(
     # Reasoning / thinking params (same logic as generate())
     extra_body: Dict[str, Any] = {}
     if enable_thinking is None:
-        env_val = os.environ.get("CODEAGENT_LLM_ENABLE_THINKING", "1")
+        env_val = _ea.pick_default("1", *_ea.LLM_ENABLE_THINKING)
         resolved_thinking = env_val.lower() not in ("0", "false", "no", "")
     else:
         resolved_thinking = bool(enable_thinking)
@@ -333,16 +332,16 @@ def generate_stream(
     if _is_deepseek_url(self.baseURL):
         extra_body["thinking"] = {"type": "enabled" if resolved_thinking else "disabled"}
         if resolved_thinking:
-            effort = os.environ.get("CODEAGENT_LLM_REASONING_EFFORT", "").strip().lower()
+            effort = _ea.pick_default("", *_ea.LLM_REASONING_EFFORT).strip().lower()
             if effort in ("low", "medium", "high", "max"):
                 params["reasoning_effort"] = effort
     else:
-        if os.environ.get("CODEAGENT_LLM_SEPARATE_REASONING", "1") != "0":
+        if _ea.pick_default("1", *_ea.LLM_SEPARATE_REASONING) != "0":
             extra_body["separate_reasoning"] = True
-        if os.environ.get("CODEAGENT_LLM_CHAT_TEMPLATE_KWARGS", "1") != "0":
+        if _ea.pick_default("1", *_ea.LLM_CHAT_TEMPLATE_KWARGS) != "0":
             extra_body.setdefault("chat_template_kwargs", {})
             extra_body["chat_template_kwargs"]["enable_thinking"] = resolved_thinking
-    user_extra = os.environ.get("CODEAGENT_LLM_EXTRA_BODY", "").strip()
+    user_extra = _ea.pick_nonempty(*_ea.LLM_EXTRA_BODY)
     if user_extra:
         try:
             parsed = json.loads(user_extra)
@@ -480,12 +479,20 @@ def count_tokens(self, text: str) -> int:
     return len(text.encode('utf-8')) // 4
 
 
+# Implemented as module-level functions (``self`` first arg) for historical file layout;
+# expose them on the class so instances match ``llm.generate(...)`` / ``llm.generate_stream(...)``.
+LLMAPIExecutor.generate = generate
+LLMAPIExecutor.generate_stream = generate_stream
+LLMAPIExecutor.count_tokens = count_tokens
+
 
 """LLM API executor for CodeAgent - Connect to external LLM API"""
 import json
 import logging
 import os
 from typing import Any, Dict, List, Optional
+
+from seed.core import env_access as _ea
 
 logger = logging.getLogger(__name__)
 
@@ -495,10 +502,10 @@ def _is_deepseek_url(base_url: Optional[str] = None) -> bool:
     Detect DeepSeek official API.
 
     Prefer ``base_url`` from :class:`LLMAPIExecutor` (Web UI presets may point at
-    DeepSeek while ``CODEAGENT_LLM_BASEURL`` still holds a default / other host).
-    Without a URL, fall back to ``CODEAGENT_LLM_BASEURL``.
+    DeepSeek while env ``SEED_LLM_BASEURL`` still holds a default / other host).
+    Without a URL, fall back to env base URL.
     """
-    raw = (base_url or "").strip() or (os.environ.get("CODEAGENT_LLM_BASEURL", "") or "")
+    raw = (base_url or "").strip() or _ea.pick_nonempty(*_ea.LLM_BASEURL)
     return "api.deepseek.com" in raw.lower()
 
 
@@ -521,7 +528,7 @@ def _openai_chat_messages(
         gated behind an env flag, with a safe auto-enable for DeepSeek's
         official endpoint.
         """
-        env = os.environ.get("CODEAGENT_LLM_SEND_REASONING_CONTENT", "").strip().lower()
+        env = _ea.pick_default("", *_ea.LLM_SEND_REASONING_CONTENT).strip().lower()
         if env in ("1", "true", "yes", "on"):
             return True
         if env in ("0", "false", "no", "off"):
@@ -571,7 +578,7 @@ def _openai_chat_messages(
 
     # After the last `user` in this request, if the tail contains any `tool`
     # message, DeepSeek requires every `assistant` in that tail to carry
-    # `reasoning_content` (possibly ""). Legacy rows may omit the key — patch.
+    # `reasoning_content` (possibly ""). Fill missing keys so the request validates.
     if include_rc and out:
         last_user_i = -1
         for i, x in enumerate(out):
@@ -597,20 +604,16 @@ def assistant_toolcall_content_placeholder() -> Optional[str]:
     会把「空正文 + 工具」误判为异常并中断工具链。用非空占位符可稳定多轮。
 
     环境变量：
-    - ``CODEAGENT_ASSISTANT_TOOLCALL_PLACEHOLDER_DISABLE=1``：不替换（保持空 / null 行为）
-    - ``CODEAGENT_ASSISTANT_TOOLCALL_PLACEHOLDER=...``：显式指定占位正文（可为空字符串）
+    - ``SEED_ASSISTANT_TOOLCALL_PLACEHOLDER_DISABLE=1``（或 ``CODEAGENT_*`` 别名）：不替换
+    - ``SEED_ASSISTANT_TOOLCALL_PLACEHOLDER=...``：显式指定占位正文（可为空字符串）
     - 未设置 PLACEHOLDER 时：默认一个 ASCII 空格（对模型干扰最小）
     """
-    if os.environ.get("CODEAGENT_ASSISTANT_TOOLCALL_PLACEHOLDER_DISABLE", "").lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    ):
+    dis = _ea.pick_default("", *_ea.ASSISTANT_TOOLCALL_PLACEHOLDER_DISABLE).lower()
+    if dis in ("1", "true", "yes", "on"):
         return None
-    key = "CODEAGENT_ASSISTANT_TOOLCALL_PLACEHOLDER"
-    if key in os.environ:
-        return os.environ[key]
+    for k in _ea.ASSISTANT_TOOLCALL_PLACEHOLDER:
+        if k in os.environ:
+            return os.environ[k]
     return " "
 
 
@@ -703,7 +706,7 @@ def get_llm_executor(
         model: Override model name from environment
         api_key: Override API key from environment (non-empty only)
         auth_scheme: Override auth scheme from environment (non-empty only)
-        max_tokens: Override ``CODEAGENT_LLM_MAX_TOKENS`` when set
+        max_tokens: Override ``SEED_LLM_MAX_TOKENS`` when set
 
     Returns:
         LLMAPIExecutor instance
@@ -711,28 +714,28 @@ def get_llm_executor(
     global _default_executor, _executor_env_key
 
     resolved_url = (
-        (baseURL if baseURL is not None else os.environ.get("CODEAGENT_LLM_BASEURL") or "")
+        (baseURL if baseURL is not None else _ea.pick_nonempty(*_ea.LLM_BASEURL))
         .strip()
         .rstrip("/")
     )
     if model is not None and str(model).strip():
         resolved_model = str(model).strip()
     else:
-        resolved_model = os.environ.get(
-            "CODEAGENT_LLM_MODEL", "Qwen/Qwen3.5-35B-A3B-GPTQ-Int4"
+        resolved_model = _ea.pick_default(
+            "Qwen/Qwen3.5-35B-A3B-GPTQ-Int4", *_ea.LLM_MODEL
         )
 
     max_tok = (
         str(int(max_tokens))
         if max_tokens is not None
-        else os.environ.get("CODEAGENT_LLM_MAX_TOKENS", "8192")
+        else _ea.pick_default("8192", *_ea.LLM_MAX_TOKENS)
     )
 
-    resolved_api = os.environ.get("CODEAGENT_LLM_API_KEY", "").strip()
+    resolved_api = _ea.pick_nonempty(*_ea.LLM_API_KEY)
     if api_key is not None and api_key.strip():
         resolved_api = api_key.strip()
 
-    resolved_scheme = os.environ.get("CODEAGENT_LLM_AUTH_SCHEME", "Bearer").strip() or "Bearer"
+    resolved_scheme = (_ea.pick_nonempty(*_ea.LLM_AUTH_SCHEME) or "Bearer")
     if auth_scheme is not None and auth_scheme.strip():
         resolved_scheme = auth_scheme.strip()
 
@@ -776,12 +779,12 @@ def request_json_size(params: Dict[str, Any]) -> int:
 
 def max_llm_request_body_bytes(base_url: Optional[str]) -> int:
     """0 = disabled. Official DeepSeek API often sits behind a ~1MiB reverse-proxy limit."""
-    raw = os.environ.get("CODEAGENT_LLM_MAX_REQUEST_BODY_BYTES", "").strip()
+    raw = _ea.pick_nonempty(*_ea.LLM_MAX_REQUEST_BODY_BYTES)
     if raw:
         try:
             return max(0, int(raw))
         except ValueError:
-            logger.warning("Invalid CODEAGENT_LLM_MAX_REQUEST_BODY_BYTES=%r", raw)
+            logger.warning("Invalid SEED_LLM_MAX_REQUEST_BODY_BYTES=%r", raw)
     if _is_deepseek_url(base_url or ""):
         return 786432  # 768 KiB — leave headroom below common 1MiB nginx limits
     return 0
@@ -813,7 +816,7 @@ def maybe_shrink_llm_request_params(
             last_ai = i
             break
 
-    base_cap = int(os.environ.get("CODEAGENT_TOOL_OUTPUT_MAX_CHARS", "48000"))
+    base_cap = int(_ea.pick_default("48000", *_ea.TOOL_OUTPUT_MAX_CHARS))
     base_cap = max(500, min(base_cap, 200_000))
     tool_caps: List[int] = []
     x = base_cap
@@ -906,8 +909,8 @@ def maybe_shrink_llm_request_params(
     else:
         logger.warning(
             "LLM JSON request body still ~%s bytes (limit %s). "
-            "Enable CODEAGENT_CONTEXT_COMPACT=1, lower CODEAGENT_CHAT_USER_ROUNDS / "
-            "CODEAGENT_TOOL_OUTPUT_MAX_CHARS, or set CODEAGENT_LLM_MAX_REQUEST_BODY_BYTES=0 "
+            "Enable SEED_CONTEXT_COMPACT=1, lower SEED_CHAT_USER_ROUNDS / "
+            "SEED_TOOL_OUTPUT_MAX_CHARS, or set SEED_LLM_MAX_REQUEST_BODY_BYTES=0 "
             "only if your gateway allows larger uploads.",
             after,
             max_bytes,

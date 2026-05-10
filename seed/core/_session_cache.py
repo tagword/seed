@@ -1,7 +1,7 @@
 """Shared in-memory session state used by server and cron scheduler.
 
-This belongs in seed (engine) because both the server and cron_sched need
-access to the same live sessions dict. Putting it in codeagent would create
+This belongs in ``seed.core`` because both the server and ``cron_sched`` need
+access to the same live sessions dict. Keeping it in seed avoids import cycles in host apps.
 a reverse dependency.
 """
 
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import threading
 from collections import defaultdict
-from typing import Any, DefaultDict, Dict, Set
+from typing import Any, DefaultDict, Dict, List, Set
 
 from seed.core.models import Session
 
@@ -19,6 +19,10 @@ SESSIONS: Dict[str, Session] = {}
 WS_BY_SESSION: DefaultDict[str, Set[Any]] = defaultdict(set)
 # Cancel events for active chats
 ACTIVE_CHAT_CANCELS: Dict[str, threading.Event] = {}
+# Pending in-flight message injections, keyed by _memkey(agent_id, session_id)
+# When a chat session is busy, new messages are queued here and picked up by
+# the running tool loop at the next round boundary.
+PENDING_INJECTIONS: Dict[str, List[Dict[str, Any]]] = {}
 
 
 def _memkey(agent_id: str, session_id: str) -> str:

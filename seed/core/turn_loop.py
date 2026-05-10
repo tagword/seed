@@ -5,6 +5,7 @@ import logging
 import os
 from typing import Optional, Tuple
 
+from seed.core import env_access as _ea
 from seed.core.commands import CommandRouter
 from seed.core.llm_exec import LLMAPIExecutor
 from seed.core.mem_sys import MemorySystem
@@ -112,7 +113,7 @@ class TurnLoopEngine:
             from seed.core.llm_sess import llm_sessions_dir
             from seed.core.sess_store import SessionManager
 
-            raw = os.environ.get("CODEAGENT_SESSION_DIR", "").strip()
+            raw = _ea.pick_nonempty(*_ea.SESSION_DIR)
             base = str(Path(raw).expanduser().resolve()) if raw else str(llm_sessions_dir())
             manager = SessionManager(base)
             manager.update_session(self.session)
@@ -733,10 +734,7 @@ def _execute_direct_tool(self, task_number: int, tool_name: str, **kwargs) -> Di
         }
 
 class AutonomousTurnLoop(TurnLoopEngine):
-    """
-    Compatibility wrapper to expose the pre-existing name used in tests:
-    AutonomousTurnLoop -> TurnLoopEngine
-    """
+    """Subclass of ``TurnLoopEngine`` kept as a stable alias for tests and older imports."""
 
     def __init__(
         self,

@@ -35,7 +35,7 @@ class SessionStore:
 
 
 class SessionManager:
-    """Compatibility shim for turn-loop auto-save (same directory layout as ``SessionStore``)."""
+    """Thin wrapper over ``SessionStore`` for turn-loop auto-save (same on-disk layout)."""
 
     def __init__(self, base_path: str) -> None:
         self._store = SessionStore(base_path)

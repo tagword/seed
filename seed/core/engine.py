@@ -1,13 +1,23 @@
-"""Turn loop engine with state management"""
+"""
+Stateful prompt/query loop with routing hooks and optional session persistence.
 
-from typing import Optional, List
-from dataclasses import dataclass
+``QueryEngine`` is a lighter-weight loop than ``TurnLoopEngine`` (see
+``seed.core.turn_loop``). Prefer ``TurnLoopEngine`` for full agent turns,
+tools, and autonomous mode; use ``QueryEngine`` when you only need routing
+and token/session bookkeeping.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, asdict
 from datetime import datetime
-import os
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from seed.core.models import QueryTurnResult, UsageMetrics
-from .routing import find_commands
-from .persistence import save_session, SESSIONS_DIR
+from seed.core.persistence import SESSIONS_DIR as _SESSIONS_DIR
+from seed.core.routing import find_commands
 
 DEFAULT_MAX_TURNS = 8
 DEFAULT_BUDGET_TOKENS = 2000
@@ -25,7 +35,7 @@ class EngineConfig:
 
 class QueryEngine:
     """
-    Stateful turn loop engine for codeagent.
+    Stateful turn loop engine (Seed kernel).
     Handles message routing, token tracking, and session management.
     """
 
@@ -42,69 +52,76 @@ class QueryEngine:
 
     def submit_message(self, message: str, turn_limit: Optional[int] = None) -> QueryTurnResult:
         """Process a message through the turn loop."""
-        # Check termination
         if self.is_terminated:
             return QueryTurnResult(
-                status='terminated',
-                turn_type='turn',
+                status="terminated",
+                turn_type="turn",
                 matched_commands=[],
-                stop_reason='session_terminated',
-                error="Session already terminated"
+                stop_reason="session_terminated",
+                error="Session already terminated",
             )
 
-        # Check turn limit
         effective_limit = turn_limit or self.config.max_turns
         if self.turn_count >= effective_limit:
             self.is_terminated = True
             return QueryTurnResult(
-                status='stop',
-                turn_type='max_turns',
+                status="stop",
+                turn_type="max_turns",
                 matched_commands=[],
-                stop_reason='max_turns_reached'
+                stop_reason="max_turns_reached",
             )
 
-        # Check budget
         if self.token_input + self.token_output > self.config.token_budget:
             self.is_terminated = True
             return QueryTurnResult(
-                status='stop',
-                turn_type='budget',
+                status="stop",
+                turn_type="budget",
                 matched_commands=[],
-                stop_reason='budget_exceeded'
+                stop_reason="budget_exceeded",
             )
 
-        # Add message to history
         self.message_history.append(message)
         self.turn_count += 1
 
-        # Find matching commands
         matched = find_commands(message, limit=5)
-        matches = [m.name for m in matched if hasattr(m, 'name')]
+        matches = [m.name for m in matched if hasattr(m, "name")]
 
-        # Create result
         return QueryTurnResult(
-            status='success',
-            turn_type='prompt',
+            status="success",
+            turn_type="prompt",
             matched_commands=matches,
             output=message,
-            stop_reason=None
+            stop_reason=None,
         )
 
     def persist_session(self) -> Optional[str]:
-        """Persist session state to file."""
-        ensure_dir = lambda d: os.makedirs(d, exist_ok=True) if d else None
-        ensure_dir(self.config.auto_save_dir)
-        ensure_dir(SESSIONS_DIR)
-        session_id = self.session_id or "session"
+        """Write a JSON snapshot of engine state under ``auto_save_dir`` or the default sessions path."""
+        session_dir = (
+            Path(self.config.auto_save_dir).resolve()
+            if self.config.auto_save_dir
+            else Path(_SESSIONS_DIR)
+        )
+        session_dir.mkdir(parents=True, exist_ok=True)
+        sid = self.session_id or "session"
+        data: Dict[str, Any] = {
+            "session_id": sid,
+            "messages": self.message_history,
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+            "metrics": {"turn_count": self.turn_count, "message_count": len(self.message_history)},
+            "tokens": {"input": self.token_input, "output": self.token_output},
+            "turn_count": self.turn_count,
+        }
+        path = session_dir / f"{sid}.json"
         try:
-            save_session(session_id, self.message_history, self.token_input, self.token_output)
-            return os.path.join(SESSIONS_DIR, f"{session_id}.json")
-        except Exception as e:
+            path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+            return str(path)
+        except OSError as e:
             print(f"Error persisting session: {e}")
-        return None
+            return None
 
     def _estimate_tokens(self, text: str) -> int:
-        """Estimate token count."""
+        """Rough token estimate (4 chars per token)."""
         return len(text.split()) * 4
 
     def render_summary(self) -> str:
@@ -119,7 +136,7 @@ class QueryEngine:
             f"Output tokens: {self.token_output}",
             f"Total tokens: {token_total}",
             f"Status: {'terminated' if self.is_terminated else 'active'}",
-            f"Last turn: {datetime.now().isoformat()}"
+            f"Last turn: {datetime.now().isoformat()}",
         ]
         return "\n".join(lines)
 
