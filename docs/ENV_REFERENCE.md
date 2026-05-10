@@ -1,6 +1,6 @@
 # 环境变量参考（Seed canonical）
 
-规范前缀为 **`SEED_*`**。为实现兼容，内核在 **`seed.core.env_access`** 中对多数变量仍识别 **`CODEAGENT_*`**（同名后缀），读取顺序为：**先 `SEED_*`，再 `CODEAGENT_*`**。`CODEAGENT_*` 可能在后续 major 版本中移除，新集成请只用 `SEED_*`。
+规范前缀为 **`SEED_*`**。为实现兼容性过渡，内核在 **`seed.core.env_access`** 中对多数变量仍识别 **`CODEAGENT_*`**（同名后缀）作为别名，读取顺序为：**先 `SEED_*`，再 `CODEAGENT_*`**。`CODEAGENT_*` 可能在后续 major 版本中移除，新集成请只用 `SEED_*`。
 
 下列表格与 `env_access` 中的元组常量一致；实现细节以源码为准。
 
@@ -91,7 +91,7 @@
 | `SEED_WEBHOOK_DEDUP_TTL_SEC` | `CODEAGENT_WEBHOOK_DEDUP_TTL_SEC` | 去重 TTL（秒） |
 | `SEED_WEBHOOK_DEDUP_MAX_KEYS` | `CODEAGENT_WEBHOOK_DEDUP_MAX_KEYS` | 去重表最大条目 |
 
-## 会话标题（Web UI）
+## 会话标题
 
 | Seed canonical | 别名 | 含义（摘要） |
 |----------------|------|--------------|
@@ -111,5 +111,5 @@
 
 ## 说明
 
-- **未列入上表**、仍以 `CODEAGENT_*` 或 `SEED_*` 出现在 `config/seed.env.example`（或旧模板）中的变量，可能仅由上层应用或尚未迁入 `env_access` 的模块读取；以各自模块文档为准。
+- **未列入上表**、仍以 `CODEAGENT_*` 或 `SEED_*` 出现在 `config/seed.env.example` 中的变量，可能仅由上层应用或尚未迁入 `env_access` 的模块读取；以各自模块文档为准。
 - 读取辅助函数：`pick_nonempty`、`pick_default`、`env_truthy` 等定义在 **`seed.core.env_access`**。

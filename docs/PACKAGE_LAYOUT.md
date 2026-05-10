@@ -14,15 +14,15 @@ Monorepo 内有两个 **可独立安装** 的 Python 发行根：
 ## 依赖方向（保持单向）
 
 ```
-上层产品（如 CodeAgent）→ seed-tools → seed
-                     └→ seed（仅内核时可不装 seed-tools）
+宿主应用 → seed-tools → seed
+        └→ seed（仅内核时可不装 seed-tools）
 
 seed_tools      → seed.core（及按需 seed.integrations）
 seed.integrations → seed.core
 seed.core       → 标准库 + httpx + requests + ddgs（以 seed/pyproject.toml 为准）
 ```
 
-**禁止** `seed.core` / `seed.integrations` / `seed_tools` **以任何形式依赖 `codeagent` 包**（不得 `import codeagent`，不得在 `pyproject.toml` 中声明对 codeagent 的依赖）。CodeAgent 等产品只能 **依赖 Seed**，不能反过来。
+**禁止** `seed.core` / `seed.integrations` / `seed_tools` **依赖任何宿主产品包**。宿主产品只能**依赖 Seed**，不能反过来。
 
 **禁止** `seed.core` / `seed.integrations` 在 import 时依赖 `seed_tools`。Builtin 工具的 **Registry / Executor 契约**在 `seed.core.tool_runtime`；具体 handler 在 `seed_tools`。
 
@@ -44,15 +44,15 @@ seed.core       → 标准库 + httpx + requests + ddgs（以 seed/pyproject.tom
 - `seed` 入口：`seed.cli:main`（随 `seed` 包安装）
 - `seed info` / `seed check`：校验 `seed.core`、`seed.integrations`；若已安装则校验 `seed_tools`
 
-## CI：禁止依赖 CodeAgent 包
+## CI：禁止依赖宿主产品包
 
-Monorepo 根目录脚本 [`scripts/check_seed_stack_isolation.py`](../../scripts/check_seed_stack_isolation.py) 会扫描 `seed/seed`、`seed-tools/seed_tools` 中的 Python 导入及二者 `pyproject.toml` 依赖表；若出现对 **`codeagent`** 包的依赖则失败。GitHub Actions 工作流：`.github/workflows/seed-stack-isolation.yml`。本地可在仓库根执行：
+Monorepo 根目录脚本 [`scripts/check_seed_stack_isolation.py`](../../scripts/check_seed_stack_isolation.py) 会扫描 `seed/seed`、`seed-tools/seed_tools` 中的 Python 导入及二者 `pyproject.toml` 依赖表；若出现对宿主产品包的依赖则失败。本地可在仓库根执行：
 
 ```bash
 python scripts/check_seed_stack_isolation.py
 ```
 
-## 上层产品（如 CodeAgent）
+## 上层宿主产品
 
 属于 **Seed 的宿主**：在自身 `pyproject.toml` 里声明对 **`seed`** / **`seed-tools`** 的依赖（或把二者源码根加入 `PYTHONPATH`），通过 `from seed…`、`from seed_tools…` 调用内核与内置工具。**宿主仓库不得被 Seed 引用为库依赖。**
 
