@@ -12,6 +12,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+server = ["apscheduler>=3.10.0"]
 dev = ["pytest>=7.0", "ruff>=0.4.0", "bandit>=1.7.0"]
 
 [project.scripts]

@@ -13,7 +13,8 @@
 ### PyPI（发布后）
 
 ```bash
-pip install seed
+pip install seed            # 仅内核 + 集成层
+pip install 'seed[server]'  # 含定时任务等 server 依赖（APScheduler）
 ```
 
 若需要内置工具注册与实现，再安装：

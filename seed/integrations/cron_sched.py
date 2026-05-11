@@ -429,7 +429,7 @@ def start_cron_scheduler() -> None:
     except ImportError:
         logger.warning(
             "cron: APScheduler not installed; scheduled jobs will not run. "
-            "Install with: pip install apscheduler"
+            "Install with: pip install 'seed[server]'"
         )
         return
 
