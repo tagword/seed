@@ -935,17 +935,18 @@ async def run_llm_tool_loop(
         if on_check_pending_messages:
             try:
                 pending = on_check_pending_messages()
-                if pending:
-                    messages.extend(pending)
             except Exception:
                 logger.exception("check_pending_messages failed")
-            reply = ""
-            for m in reversed(messages):
-                if isinstance(m, dict) and m.get("role") == "assistant":
-                    c = m.get("content")
-                    reply = c if isinstance(c, str) else str(c or "")
-                    break
-            return reply, last_meta, tools_used, tool_trace, loop_meta
+                pending = []
+            if pending:
+                messages.extend(pending)
+                reply = ""
+                for m in reversed(messages):
+                    if isinstance(m, dict) and m.get("role") == "assistant":
+                        c = m.get("content")
+                        reply = c if isinstance(c, str) else str(c or "")
+                        break
+                return reply, last_meta, tools_used, tool_trace, loop_meta
 
         # --- Streaming LLM round (per-token) ---
         content, tool_calls, meta = await asyncio.to_thread(

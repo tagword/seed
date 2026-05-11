@@ -11,6 +11,7 @@ Security:
 import ipaddress
 import os
 import socket
+import sys
 from typing import Any, Dict, List
 
 from seed.core import env_access as _ea
@@ -633,14 +634,57 @@ def _windows_browser_candidates(browser: str) -> List[str]:
     ]
 
 
+def _darwin_browser_candidates(browser: str) -> List[str]:
+    """macOS 下的浏览器候选路径。"""
+    b = (browser or "chrome").strip().lower()
+    if b == "edge":
+        return [
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            os.path.expanduser("~/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
+        ]
+    # chrome / chromium / 默认
+    return [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        os.path.expanduser("~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        os.path.expanduser("~/Applications/Chromium.app/Contents/MacOS/Chromium"),
+    ]
+
+
+def _linux_browser_candidates(browser: str) -> List[str]:
+    """Linux 下的浏览器候选路径。"""
+    b = (browser or "chrome").strip().lower()
+    if b == "edge":
+        return [
+            "/usr/bin/microsoft-edge",
+            "/usr/bin/microsoft-edge-stable",
+        ]
+    return [
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+    ]
+
+
 def _resolve_browser_executable(browser: str, explicit_path: str = "") -> str:
     if explicit_path and os.path.isfile(explicit_path):
         return explicit_path
-    for p in _windows_browser_candidates(browser):
+
+    # 按平台选择候选路径集
+    if sys.platform == "darwin":
+        candidates = _darwin_browser_candidates(browser)
+    elif sys.platform.startswith("linux"):
+        candidates = _linux_browser_candidates(browser)
+    else:
+        candidates = _windows_browser_candidates(browser)
+
+    for p in candidates:
         if os.path.isfile(p):
             return p
+
     raise BrowserError(
-        f"Cannot find browser executable for {browser!r}. "
+        f"Cannot find browser executable for {browser!r} on {sys.platform}. "
         "Pass browser_path explicitly or install Chrome/Edge in the default location."
     )
 
