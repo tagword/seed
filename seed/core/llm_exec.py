@@ -379,6 +379,9 @@ def generate_stream(
         finish_reason: Optional[str] = None
         usage: Dict[str, Any] = {}
 
+        # 强制 UTF-8 解码，兼容部分 SSE 服务端未返回 charset=utf-8 的情况
+        resp.encoding = "utf-8"
+
         for line in resp.iter_lines(decode_unicode=True):
             if not line or not line.startswith("data: "):
                 continue
