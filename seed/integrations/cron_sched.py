@@ -18,6 +18,9 @@ from seed.core import env_access as _ea
 
 logger = logging.getLogger(__name__)
 
+# Track currently running cron jobs to prevent overlapping triggers
+_active_jobs: set = set()
+
 
 def _normalize_cron_outcome(text: str) -> str:
     return " ".join((text or "").strip().split())
@@ -197,11 +200,11 @@ async def _run_cron_job_async(job: Dict[str, Any]) -> None:
     if not prompt:
         logger.warning("cron job %s: empty prompt, skip", jid)
         return
-    try:
-        max_rounds = int(job.get("max_tool_rounds") or 12)
-    except (TypeError, ValueError):
-        max_rounds = 12
-    max_rounds = max(1, min(max_rounds, 32))
+    # Skip if previous run is still in progress
+    if jid in _active_jobs:
+        logger.info("cron job %s: previous run still active, skip this trigger", jid)
+        return
+    _active_jobs.add(jid)
 
     try:
         from seed.core.paths import ensure_agent_dirs
@@ -311,13 +314,11 @@ async def _run_cron_job_async(job: Dict[str, Any]) -> None:
             )
         reg, exe = _tools_for_agent(agent_id)
         n_before = len(api_msgs)
-        # run_llm_tool_loop is already async — await directly
-        reply, _, tools_used, tool_trace, _loop_meta = await run_llm_tool_loop(
-            llm,
-            exe,
+        # ── single run (no continuation loop — cron interval handles retriggering) ──
+        reply, __, tools_used, tool_trace, _loop_meta = await run_llm_tool_loop(
+            llm, exe,
             messages=api_msgs,
             registry=reg,
-            max_tool_rounds=max_rounds,
         )
         tail = merge_llm_tail_into_full(chat_sess.messages, api_msgs, n_before)
         try:
@@ -385,6 +386,7 @@ async def _run_cron_job_async(job: Dict[str, Any]) -> None:
         except Exception:
             pass
     finally:
+        _active_jobs.discard(jid)
         clear_active_project_episodic()
         set_active_llm_session(None)
 
@@ -518,7 +520,6 @@ def save_cron_job(job: Dict[str, Any]) -> None:
         "agent_id": str(job.get("agent_id") or "default").strip() or "default",
         "session_id": str(job.get("session_id") or "").strip() or ("cron-" + jid),
         "prompt": str(job.get("prompt") or "").strip(),
-        "max_tool_rounds": int(job.get("max_tool_rounds") or 12),
     }
     if job.get("timezone"):
         entry["timezone"] = str(job.get("timezone") or "").strip()
@@ -584,7 +585,7 @@ def cron_status_for_ui() -> Dict[str, Any]:
             "agent_id": str(j.get("agent_id") or "default").strip() or "default",
             "session_id": str(j.get("session_id") or "").strip(),
             "prompt": str(j.get("prompt") or "").strip(),
-            "max_tool_rounds": int(j.get("max_tool_rounds") or 12),
+            "project_id": str(j.get("project_id") or "").strip(),
         }
         title = str(j.get("title") or "").strip()
         if title:
@@ -634,11 +635,11 @@ def run_cron_job_sync(job: Dict[str, Any]) -> None:
     if not prompt:
         logger.warning("cron job %s: empty prompt, skip", jid)
         return
-    try:
-        max_rounds = int(job.get("max_tool_rounds") or 12)
-    except (TypeError, ValueError):
-        max_rounds = 12
-    max_rounds = max(1, min(max_rounds, 32))
+    # Skip if previous run is still in progress
+    if jid in _active_jobs:
+        logger.info("cron job %s: previous run still active, skip this trigger", jid)
+        return
+    _active_jobs.add(jid)
 
     try:
         from seed.core.paths import ensure_agent_dirs
@@ -743,13 +744,12 @@ def run_cron_job_sync(job: Dict[str, Any]) -> None:
             )
         reg, exe = _tools_for_agent(agent_id)
         n_before = len(api_msgs)
-        reply, _, tools_used, tool_trace, _loop_meta = asyncio.run(
+        # ── single run (no continuation loop — cron interval handles retriggering) ──
+        reply, __, tools_used, tool_trace, _loop_meta = asyncio.run(
             run_llm_tool_loop(
-                llm,
-                exe,
+                llm, exe,
                 messages=api_msgs,
                 registry=reg,
-                max_tool_rounds=max_rounds,
             )
         )
         tail = merge_llm_tail_into_full(chat_sess.messages, api_msgs, n_before)
@@ -818,6 +818,7 @@ def run_cron_job_sync(job: Dict[str, Any]) -> None:
         except Exception:
             pass
     finally:
+        _active_jobs.discard(jid)
         clear_active_project_episodic()
         set_active_llm_session(None)
 

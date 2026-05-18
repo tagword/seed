@@ -507,10 +507,20 @@ def build_api_projection_messages(
     *,
     max_user_rounds: int,
     skills_suffix: Optional[str] = None,
+    cursor: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Deep-copy ``full_messages`` and apply in-memory-only shaping for the LLM:
     optional skills suffix on ``system``, then ``trim_messages_by_user_rounds``.
+
+    **链式摘要重建**：扫描 ``_compact_summary`` 字段（见 ``maybe_compact_context_messages``），
+    找到最新的边界消息，将其之前的所有消息替换为 ``<<<SEED_COMPACT>>>`` 块注入 system prompt，
+    从而避免每轮用全部原始消息做投影。
+
+    **会话游标**（``cursor`` 参数）：
+      - None / ``{"mode": "tail"}``：默认行为，从末尾投影最近 N 轮
+      - ``{"mode": "head", "from_idx": N}``：从 ``full_messages[N]`` 开始投影（回滚模式），
+        此时跳过链式摘要重建（因为用户想从头看原始消息）
 
     Pass the result to ``maybe_compact_context_messages`` / ``run_llm_tool_loop``;
     do not replace persisted ``Session.messages`` with this list.
@@ -518,6 +528,44 @@ def build_api_projection_messages(
     import copy as _copy
 
     api = _copy.deepcopy(full_messages)
+
+    # ── 会话游标 ──
+    _cursor = cursor or {}
+    _cursor_mode = _cursor.get("mode", "tail")
+    if _cursor_mode == "head":
+        from_idx = int(_cursor.get("from_idx", 0))
+        if from_idx > 0 and from_idx < len(api):
+            has_sys = bool(api and api[0].get("role") == "system")
+            if has_sys and from_idx > 0:
+                # 保留 system，从 from_idx 开始取消息
+                api = [api[0]] + api[from_idx:]
+            else:
+                api = api[from_idx:]
+        # head 模式下跳过链式摘要重建（用户想从该点重新开始）
+    elif _cursor_mode == "tail":
+        # ── 链式摘要重建：扫描 _compact_summary，取最晚一条 ──
+        _last_bound_idx: int | None = None
+        _last_summary: str | None = None
+        for i, m in enumerate(api):
+            cs = m.get("_compact_summary")
+            if isinstance(cs, str) and cs.strip():
+                _last_bound_idx = i
+                _last_summary = cs.strip()
+
+        if _last_bound_idx is not None and _last_summary and _last_bound_idx > 0:
+            if api and api[0].get("role") == "system":
+                sys_msg = api[0]
+                base = strip_compact_block_from_system(str(sys_msg.get("content") or ""))
+                block = (
+                    "\n\n<<<SEED_COMPACT>>>\n"
+                    "## Earlier conversation (compressed)\n"
+                    f"{_last_summary}\n"
+                    "<<<END_SEED_COMPACT>>>\n"
+                )
+                sys_msg["content"] = base + block
+                # 保留 system + 边界消息及之后的所有消息
+                api = [sys_msg] + api[_last_bound_idx:]
+
     if skills_suffix and api and api[0].get("role") == "system":
         api[0]["content"] = str(api[0].get("content") or "").rstrip() + skills_suffix
     if max_user_rounds > 0:
@@ -697,11 +745,15 @@ logger = logging.getLogger(__name__)
 def maybe_compact_context_messages(
     messages: List[Dict[str, Any]],
     llm: LLMAPIExecutor,
-) -> None:
+) -> Optional[Dict[str, Any]]:
     """
     If enabled and the message tail (excluding system) exceeds a threshold (either
     ``MIN_BYTES`` or ``MIN_ROUNDS``), summarize older turns into the system prompt and
     drop older raw messages — keeps the last ``KEEP_USER_ROUNDS`` (default 3) verbatim.
+
+    **链式摘要**：将压缩结果写入 ``old[-1][\"_compact_summary\"]``（边界消息），
+    下一轮压缩时检测已有摘要并叠加（而非全量重算）。
+    返回压缩信息字典（供调用者写回持久化消息），或 ``None``（未触发压缩）。
 
     Env (``CODEAGENT_*`` aliases still honored):
       SEED_CONTEXT_COMPACT=1
@@ -713,20 +765,20 @@ def maybe_compact_context_messages(
       SEED_CONTEXT_SUMMARIZER_MAX_INPUT     (default 120000) — cap for summarizer input chars
     """
     if not _context_compact_enabled():
-        return
+        return None
     if not messages:
-        return
+        return None
     has_system = messages[0].get("role") == "system"
     body_start = 1 if has_system else 0
     if body_start and len(messages) < 3:
-        return
+        return None
 
     min_bytes = int(_ea.pick_default("90000", *_ea.CONTEXT_COMPACT_MIN_BYTES))
     min_rounds = int(_ea.pick_default("0", *_ea.CONTEXT_COMPACT_MIN_ROUNDS) or 0)
     keep_rounds = int(_ea.pick_default("3", *_ea.CONTEXT_COMPACT_KEEP_USER_ROUNDS))
     max_in = int(_ea.pick_default("120000", *_ea.CONTEXT_SUMMARIZER_MAX_INPUT))
     if keep_rounds < 1:
-        return
+        return None
 
     cur_bytes = _messages_body_json_bytes(messages, body_start)
     try:
@@ -753,18 +805,35 @@ def maybe_compact_context_messages(
     exceeds_rounds = (min_rounds > 0) and (len(user_idx) >= min_rounds)
 
     if not exceeds_bytes and not exceeds_rounds:
-        return
+        return None
 
     if len(user_idx) <= keep_rounds:
-        return
+        return None
 
     cut = user_idx[len(user_idx) - keep_rounds]
     old = body[:cut]
     recent = body[cut:]
     if not old:
-        return
+        return None
 
+    # ── 增量摘要检测 ──
+    # 检查 old 中的消息是否已有之前写的 _compact_summary，取最晚的一条
+    _prior_summary: str | None = None
+    for m in old:
+        cs = m.get("_compact_summary")
+        if isinstance(cs, str) and cs.strip():
+            _prior_summary = cs.strip()
+
+    # 构建 transcript：如有旧摘要，拼在前面
     transcript = _format_transcript_for_summary(old, max_in)
+    if _prior_summary:
+        transcript = (
+            "[Previous compact summary]\n"
+            + _prior_summary
+            + "\n\n[New messages since last compact]\n"
+            + transcript
+        )
+
     sum_messages: List[Dict[str, Any]] = [
         {
             "role": "system",
@@ -797,19 +866,27 @@ def maybe_compact_context_messages(
         summary, _meta = summarizer.generate(sum_messages, tools=None)
     except LLMError as e:
         logger.warning("Context compact skipped (summarizer LLM error): %s", e)
-        return
+        return None
 
     summary = (summary or "").strip()
     if not summary:
         logger.warning("Context compact skipped (empty summary)")
-        return
+        return None
+
+    # ── 链式：与旧摘要叠加（如有） ──
+    combined = summary
+    if _prior_summary:
+        combined = _prior_summary + "\n\n[continued]\n\n" + summary
+
+    # 写入 _compact_summary 到边界消息（old 中最后一条）
+    old[-1]["_compact_summary"] = combined
 
     sys_msg = messages[0]
     base = strip_compact_block_from_system(str(sys_msg.get("content") or ""))
     block = (
         "\n\n<<<SEED_COMPACT>>>\n"
         "## Earlier conversation (compressed)\n"
-        f"{summary}\n"
+        f"{combined}\n"
         "<<<END_SEED_COMPACT>>>\n"
     )
     sys_msg["content"] = base + block
@@ -819,7 +896,7 @@ def maybe_compact_context_messages(
             "type": "context_compact",
             "dropped_messages": int(len(old)),
             "kept_user_rounds": int(keep_rounds),
-            "summary_chars": int(len(summary)),
+            "summary_chars": int(len(combined)),
             "compact_min_bytes": int(min_bytes),
             "body_bytes_before": int(cur_bytes),
         }
@@ -829,6 +906,13 @@ def maybe_compact_context_messages(
         len(old),
         keep_rounds,
     )
+
+    # ── 返回压缩信息供调用者写回 chat_sess.messages ──
+    return {
+        "boundary_idx": body_start + cut - 1,  # 边界消息在 messages 中的索引
+        "compact_summary": combined,
+        "dropped_count": len(old),
+    }
 
 
 def _truncate_tool_output(text: str) -> str:
