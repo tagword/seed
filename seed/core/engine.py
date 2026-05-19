@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from seed.core.models import QueryTurnResult, UsageMetrics
-from seed.core.persistence import SESSIONS_DIR as _SESSIONS_DIR
+from seed.core.persistence import sessions_dir
 from seed.core.routing import find_commands
 
 DEFAULT_MAX_TURNS = 8
@@ -99,7 +99,7 @@ class QueryEngine:
         session_dir = (
             Path(self.config.auto_save_dir).resolve()
             if self.config.auto_save_dir
-            else Path(_SESSIONS_DIR)
+            else Path(sessions_dir())
         )
         session_dir.mkdir(parents=True, exist_ok=True)
         sid = self.session_id or "session"

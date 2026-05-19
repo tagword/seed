@@ -27,3 +27,15 @@ PENDING_INJECTIONS: Dict[str, List[Dict[str, Any]]] = {}
 
 def _memkey(agent_id: str, session_id: str) -> str:
     return f"{(agent_id or 'default').strip() or 'default'}::{session_id}"
+
+
+def cancel_all_active_chats() -> int:
+    """Signal every in-flight chat/tool loop to stop (server shutdown or SIGINT)."""
+    n = 0
+    for ev in list(ACTIVE_CHAT_CANCELS.values()):
+        try:
+            ev.set()
+            n += 1
+        except Exception:
+            pass
+    return n

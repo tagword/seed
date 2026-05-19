@@ -13,6 +13,9 @@ _episodic_project_scoped: ContextVar[bool] = ContextVar(
     "episodic_project_scoped", default=False
 )
 _episodic_project_id: ContextVar[str] = ContextVar("episodic_project_id", default="")
+_project_workspace_cwd: ContextVar[Optional[str]] = ContextVar(
+    "project_workspace_cwd", default=None
+)
 
 
 def set_active_llm_session(session_id: Optional[str]) -> None:
@@ -50,3 +53,17 @@ def active_episodic_project_id() -> str:
     if not _episodic_project_scoped.get():
         return ""
     return _episodic_project_id.get() or ""
+
+
+def set_active_project_workspace(path: Optional[str]) -> None:
+    """Web UI chat: default shell cwd when tools omit ``cwd``."""
+    p = (path or "").strip()
+    _project_workspace_cwd.set(p if p else None)
+
+
+def get_active_project_workspace_cwd() -> Optional[str]:
+    return _project_workspace_cwd.get()
+
+
+def clear_active_project_workspace() -> None:
+    _project_workspace_cwd.set(None)

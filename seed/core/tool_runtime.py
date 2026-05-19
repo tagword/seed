@@ -12,6 +12,44 @@ from seed.core.models import Tool
 logger = logging.getLogger(__name__)
 
 
+def _hook_preview(result: Any, *, max_len: int = 500) -> str:
+    if result is None:
+        return ""
+    text = result if isinstance(result, str) else str(result)
+    return text[:max_len] + ("…" if len(text) > max_len else "")
+
+
+def _emit_tool_hooks(
+    event: str,
+    tool_name: str,
+    kwargs: Dict[str, Any],
+    *,
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
+    try:
+        from seed.core.agent_context import get_active_llm_session
+        from seed.integrations.hooks import dispatch_hooks
+
+        session_id = ""
+        agent_id = "default"
+        raw = (get_active_llm_session() or "").strip()
+        if "::" in raw:
+            agent_id, session_id = raw.split("::", 1)
+        elif raw:
+            session_id = raw
+        payload: Dict[str, Any] = {
+            "tool_name": tool_name,
+            "arguments": dict(kwargs),
+            "session_id": session_id,
+            "agent_id": agent_id,
+        }
+        if extra:
+            payload.update(extra)
+        dispatch_hooks(event, payload)
+    except Exception:
+        pass
+
+
 class ToolExecutionError(Exception):
     """Exception raised for tool execution errors."""
 
@@ -127,13 +165,26 @@ class ToolExecutor:
             )
         logger.info(f"Executing tool (async): {tool_name} with args: {kwargs}")
         try:
+            _emit_tool_hooks("pre_tool_call", tool_name, kwargs)
             if inspect.iscoroutinefunction(handler):
                 result = await handler(**kwargs)
             else:
                 result = await asyncio.to_thread(handler, **kwargs)
+            _emit_tool_hooks(
+                "post_tool_call",
+                tool_name,
+                kwargs,
+                extra={"result_preview": _hook_preview(result)},
+            )
             logger.info(f"Tool '{tool_name}' executed successfully")
             return result
         except Exception as e:
+            _emit_tool_hooks(
+                "post_tool_call",
+                tool_name,
+                kwargs,
+                extra={"error": str(e)},
+            )
             raise ToolExecutionError(
                 tool_name=tool_name,
                 message=str(e),

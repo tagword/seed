@@ -59,7 +59,7 @@ class LLMAPIExecutor:
 
         if not (self.baseURL or "").strip():
             raise LLMError(
-                "未配置 LLM API 地址：请在 config/seed.env（或旧版 config/codeagent.env）中设置 SEED_LLM_BASEURL（或别名 CODEAGENT_LLM_BASEURL），"
+                "未配置 LLM API 地址：请在 config/seed.env 中设置 SEED_LLM_BASEURL（Code Agent 可在 config 中使用 CODEAGENT_LLM_BASEURL，由产品层 bridge 同步），"
                 "或在 config/seed.models.json（旧文件名 codeagent.models.json）中至少保存一条含 Base URL 与模型的预设"
                 "（未点「设为默认」时将自动使用列表中的第一条）。"
             )
@@ -359,6 +359,7 @@ def generate_stream(
     if max_body > 0:
         maybe_shrink_llm_request_params(params, max_bytes=max_body, base_url=self.baseURL)
 
+    resp = None
     try:
         resp = requests.post(
             self._get_completion_url(),
@@ -382,7 +383,14 @@ def generate_stream(
         # 强制 UTF-8 解码，兼容部分 SSE 服务端未返回 charset=utf-8 的情况
         resp.encoding = "utf-8"
 
+        try:
+            from seed.core.chat_events import is_chat_cancelled
+        except Exception:
+            is_chat_cancelled = lambda: False  # type: ignore[assignment, misc]
+
         for line in resp.iter_lines(decode_unicode=True):
+            if is_chat_cancelled():
+                break
             if not line or not line.startswith("data: "):
                 continue
             payload = line[len("data: "):].strip()
@@ -468,6 +476,12 @@ def generate_stream(
         raise LLMError(f"Failed to call LLM API (stream): {e}", original_error=e)
     except (KeyError, IndexError, TypeError) as e:
         raise LLMError(f"Unexpected API stream response: {e}", original_error=e)
+    finally:
+        if resp is not None:
+            try:
+                resp.close()
+            except Exception:
+                pass
 
 def count_tokens(self, text: str) -> int:
     """
@@ -484,9 +498,16 @@ def count_tokens(self, text: str) -> int:
 
 # Implemented as module-level functions (``self`` first arg) for historical file layout;
 # expose them on the class so instances match ``llm.generate(...)`` / ``llm.generate_stream(...)``.
-LLMAPIExecutor.generate = generate
-LLMAPIExecutor.generate_stream = generate_stream
-LLMAPIExecutor.count_tokens = count_tokens
+def ensure_llm_executor_methods() -> None:
+    """Attach module-level implementations to :class:`LLMAPIExecutor` if missing."""
+    if callable(getattr(LLMAPIExecutor, "generate_stream", None)):
+        return
+    LLMAPIExecutor.generate = generate  # type: ignore[assignment]
+    LLMAPIExecutor.generate_stream = generate_stream  # type: ignore[assignment]
+    LLMAPIExecutor.count_tokens = count_tokens  # type: ignore[assignment]
+
+
+ensure_llm_executor_methods()
 
 
 """LLM API executor for CodeAgent - Connect to external LLM API"""

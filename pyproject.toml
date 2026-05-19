@@ -26,6 +26,12 @@ build-backend = "setuptools.build_meta"
 where = ["."]
 include = ["seed*"]
 
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-v --tb=short"
+
 [tool.ruff]
 line-length = 120
 target-version = "py39"

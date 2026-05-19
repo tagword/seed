@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import List, Optional, Sequence
@@ -239,6 +240,16 @@ def ensure_default_config_files(base: Optional[Path] = None) -> None:
 # SEED_SAFETY_BASH_BLOCKED=           # 额外 bash 危险模式（逗号分隔）
 # SEED_SAFETY_BASH_ALLOWED_DIRS=      # bash 允许的工作目录（分号分隔；留空=项目根）
 # SEED_SAFETY_BASH_TIMEOUT_MAX=120    # bash 超时硬上限（秒）
+# SEED_EXEC_BACKEND=auto              # auto | local | docker — shell/test_run 执行后端
+# SEED_EXEC_DOCKER_IMAGE=python:3.12-slim
+# SEED_EXEC_DOCKER_WORKDIR=/workspace
+# SEED_EXEC_DOCKER_NETWORK=          # 可选，如 bridge；留空用 Docker 默认
+# SEED_MCP_ENABLED=1                 # MCP 桥接工具（mcp_servers / mcp_list_tools / mcp_call）
+# SEED_MCP_CALL_TIMEOUT=120          # 单次 MCP 工具调用超时（秒）
+# SEED_MCP_REGISTER_TOOLS=1          # 将 MCP 工具注册为 mcp__<server>__<tool> 供 LLM 直接调用
+# SEED_LSP_ENABLED=1                 # lsp_definition / lsp_diagnostics（见 config/lsp.json）
+# SEED_HOOKS_ENABLED=1               # config/hooks.json shell hooks
+# SEED_ORCHESTRATOR_AUTO_SPLIT=0     # split user message on --- or numbered lists
 # SEED_SAFETY_PROFILE=moderate        # 安全等级：strict / moderate / permissive
 # SEED_SAFETY_AUDIT_LOG=0             # 启用安全事件审计日志（config/audit_log.jsonl）
 #
@@ -248,8 +259,7 @@ def ensure_default_config_files(base: Optional[Path] = None) -> None:
 首次使用建议按以下顺序初始化：
 
 1. **确认项目根目录**
-   - 未设置 `SEED_PROJECT_ROOT` / `CODEAGENT_PROJECT_ROOT` 时，默认数据根为：`~/.seed`
-   - 若机器上仅有旧版数据目录 `~/.codeagent` 且尚无 `~/.seed`，会自动沿用 `~/.codeagent`
+   - 未设置 `SEED_PROJECT_ROOT` 时，默认数据根为：`~/.seed`（各产品包启动时应设置 `SEED_PROJECT_ROOT`，如 Code Agent → `~/.codeagent`）
    - 也可通过环境变量显式指定项目根
 
 2. **Markdown 配置**
@@ -275,6 +285,25 @@ def ensure_default_config_files(base: Optional[Path] = None) -> None:
     skills_dir = cfg / "skills"
     skills_dir.mkdir(parents=True, exist_ok=True)
 
+    try:
+        from seed.integrations.mcp_config import ensure_default_mcp_config
+
+        ensure_default_mcp_config(root)
+    except Exception:
+        pass
+    try:
+        from seed.integrations.lsp_config import ensure_default_lsp_config
+
+        ensure_default_lsp_config(root)
+    except Exception:
+        pass
+    try:
+        from seed.integrations.hooks_config import ensure_default_hooks_config
+
+        ensure_default_hooks_config(root)
+    except Exception:
+        pass
+
 
 CONFIG_FILENAMES: List[str] = [
     "agent.md",
@@ -291,13 +320,7 @@ def project_root() -> Path:
     if root:
         return Path(root).resolve()
     try:
-        home = Path.home()
-        seed_home = home / ".seed"
-        legacy_home = home / ".codeagent"
-        # Prefer ~/.seed; if only the legacy data dir exists, keep using it (migration).
-        if legacy_home.is_dir() and not seed_home.is_dir():
-            return legacy_home.resolve()
-        return seed_home.resolve()
+        return (Path.home() / ".seed").resolve()
     except Exception:
         return Path.cwd().resolve()
 
@@ -317,9 +340,41 @@ def _read_if_exists(path: Path) -> Optional[str]:
 
 
 
+def _load_plugin_toggles(cfg: Path) -> Optional[dict[str, bool]]:
+    """Read ``plugins`` map from host config (CodeAgent / generic seed name)."""
+    for name in ("codeagent.plugins.json", "seed.plugins.json"):
+        path = cfg / name
+        if not path.is_file():
+            continue
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(raw, dict):
+            continue
+        pl = raw.get("plugins")
+        if isinstance(pl, dict):
+            return {str(k): bool(v) for k, v in pl.items()}
+    return None
+
+
 def _plugin_skill_appendices(cfg: Path, base: Optional[Path] = None) -> List[str]:
-    """Extra Markdown blocks from ``config/skills/<plugin>.md`` when plugin is on."""
-    return []
+    """Extra Markdown blocks from ``config/skills/<name>.md`` when enabled in plugins JSON."""
+    skills_dir = cfg / "skills"
+    if not skills_dir.is_dir():
+        return []
+    toggles = _load_plugin_toggles(cfg)
+    chunks: List[str] = []
+    for p in sorted(skills_dir.glob("*.md")):
+        if p.name.startswith("."):
+            continue
+        key = p.stem
+        if toggles is not None and key in toggles and not toggles[key]:
+            continue
+        text = _read_if_exists(p)
+        if text:
+            chunks.append(f"\n## Plugin skill: {p.name}\n\n{text}\n")
+    return chunks
 
 
 # Shipped beside ``seed.cron.example.json`` when present; embedded fallback for PyInstaller / odd layouts.

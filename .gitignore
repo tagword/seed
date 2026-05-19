@@ -4,4 +4,8 @@ __pycache__/
 dist/
 build/
 .venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.DS_Store
 *.swp

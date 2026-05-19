@@ -6,17 +6,17 @@ from typing import Optional, List, Dict, Any
 from dataclasses import dataclass, asdict
 from datetime import datetime
 
-def default_user_data_dir() -> str:
-    """Prefer ~/.seed; if only ~/.codeagent exists, use it (migration from older installs)."""
-    seed_b = os.path.expanduser("~/.seed")
-    leg_b = os.path.expanduser("~/.codeagent")
-    if os.path.isdir(leg_b) and not os.path.isdir(seed_b):
-        return leg_b
-    return seed_b
+def user_data_dir() -> str:
+    """``SEED_PROJECT_ROOT`` when set (product bootstrap); else generic ``~/.seed``."""
+    pr = os.environ.get("SEED_PROJECT_ROOT", "").strip()
+    if pr:
+        return pr
+    return os.path.expanduser("~/.seed")
 
 
-SEED_USER_DATA_DIR = default_user_data_dir()
-SESSIONS_DIR = os.path.join(SEED_USER_DATA_DIR, "sessions")
+def sessions_dir() -> str:
+    return os.path.join(user_data_dir(), "sessions")
+
 
 @dataclass
 class SessionTokens:
@@ -53,7 +53,7 @@ class SessionData:
 
 def ensure_session_dir():
     """Ensure session directory exists"""
-    os.makedirs(SESSIONS_DIR, exist_ok=True)
+    os.makedirs(sessions_dir(), exist_ok=True)
 
 
 def save_session(session_id: str, messages: List[str], tokens_in: int, tokens_out: int, auto_create: bool = True):
@@ -80,7 +80,7 @@ def save_session(session_id: str, messages: List[str], tokens_in: int, tokens_ou
         turn_count=0
     )
     
-    file_path = os.path.join(SESSIONS_DIR, f"{session_id}.json")
+    file_path = os.path.join(sessions_dir(), f"{session_id}.json")
     with open(file_path, 'w', encoding='utf-8') as f:
         json.dump(asdict(session_data), f, indent=2, ensure_ascii=False)
     
@@ -97,7 +97,7 @@ def load_session(session_id: str) -> Optional[SessionData]:
     Returns:
         SessionData if found, None otherwise
     """
-    file_path = os.path.join(SESSIONS_DIR, f"{session_id}.json")
+    file_path = os.path.join(sessions_dir(), f"{session_id}.json")
     if not os.path.exists(file_path):
         return None
     
@@ -109,14 +109,14 @@ def list_sessions() -> List[str]:
     """List all session IDs in the sessions directory."""
     ensure_session_dir()
     sessions = []
-    for filename in os.listdir(SESSIONS_DIR):
+    for filename in os.listdir(sessions_dir()):
         if filename.endswith('.json'):
             sessions.append(filename[:-5])  # Remove .json extension
     return sessions
 
 def delete_session(session_id: str) -> bool:
     """Delete a session file."""
-    file_path = os.path.join(SESSIONS_DIR, f"{session_id}.json")
+    file_path = os.path.join(sessions_dir(), f"{session_id}.json")
     if os.path.exists(file_path):
         os.remove(file_path)
         return True

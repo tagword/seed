@@ -1,6 +1,10 @@
 # 环境变量参考（Seed canonical）
 
-规范前缀为 **`SEED_*`**。为实现兼容性过渡，内核在 **`seed.core.env_access`** 中对多数变量仍识别 **`CODEAGENT_*`**（同名后缀）作为别名，读取顺序为：**先 `SEED_*`，再 `CODEAGENT_*`**。`CODEAGENT_*` 可能在后续 major 版本中移除，新集成请只用 `SEED_*`。
+规范前缀为 **`SEED_*`**（通用 Agent 内核，不绑定 Code Agent 产品）。
+
+**Code Agent 产品**使用 **`CODEAGENT_*`**，见 [`codeagent/docs/ENV_REFERENCE.md`](../../codeagent/docs/ENV_REFERENCE.md)。
+
+**`seed.core.env_access` 仅识别 `SEED_*`**（Phase 6.7）。Code Agent 在调用 Seed 前通过 `codeagent.core.seed_bridge` 将 `CODEAGENT_<后缀>` 同步为 `SEED_<后缀>`（仅当后者未设置）。
 
 下列表格与 `env_access` 中的元组常量一致；实现细节以源码为准。
 
@@ -108,6 +112,21 @@
 | `SEED_BROWSER_CDP_UNHEALTHY_THRESHOLD` | `CODEAGENT_BROWSER_CDP_UNHEALTHY_THRESHOLD` | CDP 不健康阈值（次选） |
 | `SEED_BROWSER_ALLOW_REMOTE_DEBUG` | `CODEAGENT_BROWSER_ALLOW_REMOTE_DEBUG` | 允许非本机调试端口 |
 | `SEED_BROWSER_ALLOW_PRIVATE_URLS` | `CODEAGENT_BROWSER_ALLOW_PRIVATE_URLS` | 导航忽略 SSRF 私有地址拦截 |
+
+## Phase 2–5 集成（exec / MCP / LSP / hooks）
+
+| Seed canonical | 别名 | 含义（摘要） |
+|----------------|------|--------------|
+| `SEED_EXEC_BACKEND` | `CODEAGENT_EXEC_BACKEND` | `local` / `docker` / `auto` |
+| `SEED_EXEC_DOCKER_IMAGE` | `CODEAGENT_EXEC_DOCKER_IMAGE` | Docker 镜像 |
+| `SEED_EXEC_DOCKER_WORKDIR` | `CODEAGENT_EXEC_DOCKER_WORKDIR` | 容器工作目录 |
+| `SEED_EXEC_DOCKER_NETWORK` | `CODEAGENT_EXEC_DOCKER_NETWORK` | Docker network |
+| `SEED_MCP_ENABLED` | `CODEAGENT_MCP_ENABLED` | MCP 工具总开关 |
+| `SEED_MCP_CALL_TIMEOUT` | `CODEAGENT_MCP_CALL_TIMEOUT` | `mcp_call` 超时（秒） |
+| `SEED_MCP_REGISTER_TOOLS` | `CODEAGENT_MCP_REGISTER_TOOLS` | 动态注册 MCP 工具 |
+| `SEED_LSP_ENABLED` | `CODEAGENT_LSP_ENABLED` | LSP 工具开关 |
+| `SEED_HOOKS_ENABLED` | `CODEAGENT_HOOKS_ENABLED` | Hooks 开关 |
+| `SEED_ORCHESTRATOR_AUTO_SPLIT` | `CODEAGENT_ORCHESTRATOR_AUTO_SPLIT` | Orchestrator 自动拆任务 |
 
 ## 说明
 

@@ -94,6 +94,46 @@ def delete_project(agent_id: str, project_id: str) -> bool:
     return True
 
 
+def default_project_workspace(agent_id: str, project_id: str) -> str:
+    """Per-project workspace under ``agents/<id>/projects-data/<project_id>``."""
+    from seed.core.paths import agent_project_data_dir
+
+    pid = (project_id or "").strip()
+    if not pid:
+        return ""
+    return str(agent_project_data_dir(agent_id, pid).resolve())
+
+
+def resolve_project_path(agent_id: str, project_id: str) -> str:
+    """Resolved registry ``path`` only; returns ``\"\"`` when unset (workspace is optional)."""
+    row = get_project(agent_id, project_id)
+    if not row:
+        return ""
+    raw = str(row.get("path") or "").strip()
+    if not raw:
+        return ""
+    return str(Path(raw).expanduser().resolve())
+
+
+def ensure_project_path(agent_id: str, project_id: str) -> str:
+    """
+    Return the project workspace path, persisting the default when registry ``path`` is empty.
+    Creates the directory when assigning the default.
+    """
+    row = get_project(agent_id, project_id)
+    if not row:
+        return ""
+    raw = str(row.get("path") or "").strip()
+    if raw:
+        return str(Path(raw).expanduser().resolve())
+    default = default_project_workspace(agent_id, project_id)
+    if not default:
+        return ""
+    Path(default).mkdir(parents=True, exist_ok=True)
+    update_project_path(agent_id, project_id, default)
+    return default
+
+
 def update_project_path(agent_id: str, project_id: str, path: str) -> bool:
     pid = (project_id or "").strip()
     if not pid:

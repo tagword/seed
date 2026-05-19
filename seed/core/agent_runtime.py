@@ -639,6 +639,51 @@ def _messages_body_json_bytes(messages: List[Dict[str, Any]], body_start: int) -
     return len(raw.encode("utf-8"))
 
 
+def estimate_context_usage(messages: List[Dict[str, Any]]) -> Dict[str, int]:
+    """
+    Fallback context size for UI when the latest LLM round has no ``usage`` yet
+    (e.g. right after tool results are appended, before the next model call).
+  """
+    if not messages:
+        min_bytes = int(_ea.pick_default("90000", *_ea.CONTEXT_COMPACT_MIN_BYTES))
+        return {"body_bytes": 0, "compact_min_bytes": min_bytes, "message_count": 0}
+    has_system = messages[0].get("role") == "system"
+    body_start = 1 if has_system else 0
+    min_bytes = int(_ea.pick_default("90000", *_ea.CONTEXT_COMPACT_MIN_BYTES))
+    return {
+        "body_bytes": _messages_body_json_bytes(messages, body_start),
+        "compact_min_bytes": min_bytes,
+        "message_count": len(messages),
+    }
+
+
+def build_context_usage_snapshot(
+    messages: List[Dict[str, Any]],
+    meta: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Context bar for Web UI.
+
+    Prefer the latest API ``usage.prompt_tokens`` (tokens actually sent on the last
+    model call, including tools schema). Fall back to JSON body-byte estimate only
+    when no usage is available yet (between tool output and the next LLM round).
+
+    This is **not** the same as summing ``usage.total_tokens`` across rounds (billing).
+    """
+    snap: Dict[str, Any] = dict(estimate_context_usage(messages))
+    if not isinstance(meta, dict):
+        return snap
+    usage = meta.get("usage")
+    if not isinstance(usage, dict):
+        return snap
+    pt = usage.get("prompt_tokens")
+    if isinstance(pt, (int, float)) and int(pt) > 0:
+        snap["prompt_tokens"] = int(pt)
+        snap["completion_tokens"] = int(usage.get("completion_tokens") or 0)
+        snap["source"] = "api"
+    return snap
+
+
 def _format_transcript_for_summary(chunks: List[Dict[str, Any]], max_chars: int) -> str:
     lines: List[str] = []
     for m in chunks:
@@ -861,6 +906,9 @@ def maybe_compact_context_messages(
             "content": "Transcript to compress:\n\n" + transcript,
         },
     ]
+    if is_chat_cancelled():
+        return None
+
     summarizer = _summarizer_llm(llm)
     try:
         summary, _meta = summarizer.generate(sum_messages, tools=None)
@@ -891,6 +939,7 @@ def maybe_compact_context_messages(
     )
     sys_msg["content"] = base + block
     messages[:] = [sys_msg] + recent
+    body_bytes_after = _messages_body_json_bytes(messages, body_start)
     emit_chat_event(
         {
             "type": "context_compact",
@@ -899,6 +948,16 @@ def maybe_compact_context_messages(
             "summary_chars": int(len(combined)),
             "compact_min_bytes": int(min_bytes),
             "body_bytes_before": int(cur_bytes),
+            "body_bytes_after": int(body_bytes_after),
+        }
+    )
+    emit_chat_event(
+        {
+            "type": "context_usage",
+            "body_bytes": int(body_bytes_after),
+            "compact_min_bytes": int(min_bytes),
+            "message_count": int(len(messages)),
+            "compacted": True,
         }
     )
     logger.info(
@@ -956,6 +1015,8 @@ def _stream_llm_round(
     metadata: Dict[str, Any] = {}
 
     for event in llm.generate_stream(messages, tools=tool_schema):
+        if is_chat_cancelled():
+            break
         et = event.get("type")
         if et == "delta":
             text = event.get("text", "")
@@ -977,7 +1038,26 @@ def _stream_llm_round(
             metadata = event.get("metadata", {})
             break
 
+    try:
+        from seed.core.usage_accumulator import record_round_usage
+
+        record_round_usage(metadata)
+    except Exception:
+        pass
+
     return full_text, tool_calls, metadata
+
+
+def _emit_context_usage_snapshot(
+    messages: List[Dict[str, Any]],
+    meta: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Push in-flight context size to Web UI (tool-loop rounds)."""
+    try:
+        snap = build_context_usage_snapshot(messages, meta)
+        emit_chat_event({"type": "context_usage", **snap})
+    except Exception:
+        logger.debug("context_usage snapshot emit failed", exc_info=True)
 
 
 async def run_llm_tool_loop(
@@ -1001,29 +1081,13 @@ async def run_llm_tool_loop(
 
     last_meta: Dict[str, Any] = {}
 
-    for round_i in range(max(1, int(max_tool_rounds))):
-        loop_meta["rounds"] = round_i + 1
+    try:
+        for round_i in range(max(1, int(max_tool_rounds))):
+            loop_meta["rounds"] = round_i + 1
 
-        # ── 停止信号检查 ──
-        if is_chat_cancelled():
-            loop_meta["stopped_reason"] = "cancelled"
-            reply = ""
-            for m in reversed(messages):
-                if isinstance(m, dict) and m.get("role") == "assistant":
-                    c = m.get("content")
-                    reply = c if isinstance(c, str) else str(c or "")
-                    break
-            return reply, last_meta, tools_used, tool_trace, loop_meta
-
-        # ── 运行时消息注入：第二个用户消息在工具链中间到达 ──
-        if on_check_pending_messages:
-            try:
-                pending = on_check_pending_messages()
-            except Exception:
-                logger.exception("check_pending_messages failed")
-                pending = []
-            if pending:
-                messages.extend(pending)
+            # ── 停止信号检查 ──
+            if is_chat_cancelled():
+                loop_meta["stopped_reason"] = "cancelled"
                 reply = ""
                 for m in reversed(messages):
                     if isinstance(m, dict) and m.get("role") == "assistant":
@@ -1032,117 +1096,153 @@ async def run_llm_tool_loop(
                         break
                 return reply, last_meta, tools_used, tool_trace, loop_meta
 
-        # --- Streaming LLM round (per-token) ---
-        content, tool_calls, meta = await asyncio.to_thread(
-            _stream_llm_round,
-            llm,
-            messages,
-            tool_schema,
-            on_text_delta,
-            on_reasoning_delta,
-        )
-        last_meta = meta or {}
-
-        assistant_msg: Dict[str, Any] = {"role": "assistant", "content": content}
-        rc = last_meta.get("reasoning_content")
-        if rc is not None:
-            assistant_msg["reasoning_content"] = rc
-        if tool_calls:
-            assistant_msg["tool_calls"] = tool_calls
-        messages.append(assistant_msg)
-
-        if not tool_calls:
-            if on_round_persist:
+            # ── 运行时消息注入：第二个用户消息在工具链中间到达 ──
+            if on_check_pending_messages:
                 try:
-                    on_round_persist(list(tool_trace), list(tools_used))
+                    pending = on_check_pending_messages()
                 except Exception:
-                    pass
-            loop_meta["stopped_reason"] = "no_tool_calls"
-            return content, last_meta, tools_used, tool_trace, loop_meta
+                    logger.exception("check_pending_messages failed")
+                    pending = []
+                if pending:
+                    messages.extend(pending)
+                    reply = ""
+                    for m in reversed(messages):
+                        if isinstance(m, dict) and m.get("role") == "assistant":
+                            c = m.get("content")
+                            reply = c if isinstance(c, str) else str(c or "")
+                            break
+                    return reply, last_meta, tools_used, tool_trace, loop_meta
 
-        for tc in tool_calls:
-            fn = (tc.get("function") or {}) if isinstance(tc, dict) else {}
-            name = (fn.get("name") or "").strip()
-            raw_args = fn.get("arguments") if isinstance(fn.get("arguments"), str) else "{}"
-            if not isinstance(raw_args, str):
-                raw_args = json.dumps(raw_args or {}, ensure_ascii=False)
-            tid = str(tc.get("id") or "")
-            tools_used.append(name)
-            row: Dict[str, str] = {"name": name, "arguments": raw_args}
-            tool_trace.append(row)
-
-            event_id = str(uuid.uuid4())
-            emit_chat_event(
-                {
-                    "type": "tool_start",
-                    "event_id": event_id,
-                    "tool": name,
-                    "arguments": raw_args,
-                }
+            # --- Streaming LLM round (per-token) ---
+            content, tool_calls, meta = await asyncio.to_thread(
+                _stream_llm_round,
+                llm,
+                messages,
+                tool_schema,
+                on_text_delta,
+                on_reasoning_delta,
             )
-            try:
+            last_meta = meta or {}
+
+            assistant_msg: Dict[str, Any] = {"role": "assistant", "content": content}
+            rc = last_meta.get("reasoning_content")
+            if rc is not None:
+                assistant_msg["reasoning_content"] = rc
+            if tool_calls:
+                assistant_msg["tool_calls"] = tool_calls
+            messages.append(assistant_msg)
+
+            if not tool_calls:
+                _emit_context_usage_snapshot(messages, last_meta)
+                if on_round_persist:
+                    try:
+                        on_round_persist(list(tool_trace), list(tools_used))
+                    except Exception:
+                        pass
+                loop_meta["stopped_reason"] = "no_tool_calls"
+                return content, last_meta, tools_used, tool_trace, loop_meta
+
+            _emit_context_usage_snapshot(messages, last_meta)
+
+            for tc in tool_calls:
+                fn = (tc.get("function") or {}) if isinstance(tc, dict) else {}
+                name = (fn.get("name") or "").strip()
+                raw_args = fn.get("arguments") if isinstance(fn.get("arguments"), str) else "{}"
+                if not isinstance(raw_args, str):
+                    raw_args = json.dumps(raw_args or {}, ensure_ascii=False)
+                tid = str(tc.get("id") or "")
+                tools_used.append(name)
+                row: Dict[str, str] = {"name": name, "arguments": raw_args}
+                tool_trace.append(row)
+
+                event_id = str(uuid.uuid4())
+                emit_chat_event(
+                    {
+                        "type": "tool_start",
+                        "event_id": event_id,
+                        "tool": name,
+                        "arguments": raw_args,
+                    }
+                )
                 try:
-                    args_obj = json.loads(raw_args) if raw_args.strip() else {}
-                except json.JSONDecodeError:
-                    args_obj = {}
-                result = await executor.execute_with_validation_async(name, args_obj)
-                out = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
-            except Exception as e:
-                logger.exception("tool %s failed", name)
-                out = f"Error executing tool {name!r}: {e}"
+                    try:
+                        args_obj = json.loads(raw_args) if raw_args.strip() else {}
+                    except json.JSONDecodeError:
+                        args_obj = {}
+                    result = await executor.execute_with_validation_async(name, args_obj)
+                    out = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+                except Exception as e:
+                    logger.exception("tool %s failed", name)
+                    out = f"Error executing tool {name!r}: {e}"
 
-            snippet = out if len(out) <= 4000 else out[:4000] + "…"
-            row["result"] = snippet
+                snippet = out if len(out) <= 4000 else out[:4000] + "…"
+                row["result"] = snippet
 
-            if out:
-                chunk = 8000
-                for i in range(0, len(out), chunk):
-                    emit_chat_event(
-                        {
-                            "type": "tool_output",
-                            "event_id": event_id,
-                            "tool": name,
-                            "text": out[i : i + chunk],
-                        }
-                    )
-            emit_chat_event(
-                {
-                    "type": "tool_end",
-                    "event_id": event_id,
-                    "tool": name,
-                    "arguments": raw_args,
-                    "result": snippet,
-                }
-            )
+                if out:
+                    chunk = 8000
+                    for i in range(0, len(out), chunk):
+                        emit_chat_event(
+                            {
+                                "type": "tool_output",
+                                "event_id": event_id,
+                                "tool": name,
+                                "text": out[i : i + chunk],
+                            }
+                        )
+                emit_chat_event(
+                    {
+                        "type": "tool_end",
+                        "event_id": event_id,
+                        "tool": name,
+                        "arguments": raw_args,
+                        "result": snippet,
+                    }
+                )
 
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tid,
-                    "name": name,
-                    "content": out,
-                }
-            )
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tid,
+                        "name": name,
+                        "content": out,
+                    }
+                )
 
+                if on_round_persist:
+                    try:
+                        on_round_persist(list(tool_trace), list(tools_used))
+                    except Exception:
+                        pass
+
+            _emit_context_usage_snapshot(messages)
+
+        loop_meta["stopped_reason"] = "max_tool_rounds"
+        reply = ""
         if on_round_persist:
             try:
                 on_round_persist(list(tool_trace), list(tools_used))
             except Exception:
                 pass
-
-    loop_meta["stopped_reason"] = "max_tool_rounds"
-    reply = ""
-    if on_round_persist:
+        for m in reversed(messages):
+            if isinstance(m, dict) and m.get("role") == "assistant":
+                c = m.get("content")
+                reply = c if isinstance(c, str) else str(c or "")
+                break
+        return reply, last_meta, tools_used, tool_trace, loop_meta
+    finally:
         try:
-            on_round_persist(list(tool_trace), list(tools_used))
+            from seed.integrations.hooks import dispatch_hooks
+
+            dispatch_hooks(
+                "turn_end",
+                {
+                    "stopped_reason": loop_meta.get("stopped_reason"),
+                    "tools_used": list(tools_used),
+                    "rounds": loop_meta.get("rounds"),
+                },
+            )
         except Exception:
             pass
-    for m in reversed(messages):
-        if isinstance(m, dict) and m.get("role") == "assistant":
-            c = m.get("content")
-            reply = c if isinstance(c, str) else str(c or "")
-            break
-    return reply, last_meta, tools_used, tool_trace, loop_meta
 
 
 

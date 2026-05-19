@@ -1,6 +1,8 @@
-"""Optional repo-local env file: ``config/seed.env`` (legacy ``codeagent.env`` if seed file absent).
+"""Optional repo-local env files under ``<project>/config/``.
 
-Does not override existing ``os.environ`` entries.
+Loads ``seed.env`` (kernel ``SEED_*``) then ``codeagent.env`` (product ``CODEAGENT_*``).
+If only the legacy ``codeagent.env`` exists, it is still read. Does not override
+keys already present in ``os.environ`` (shell/export wins).
 """
 from __future__ import annotations
 
@@ -48,9 +50,9 @@ def _load_env_file(path: Path) -> None:
 
 def apply_seed_env_from_config(base: Optional[Path] = None) -> None:
     """
-    Load KEY=VALUE lines from ``<project>/config/seed.env`` when present;
-    otherwise from legacy ``codeagent.env``.
+    Load KEY=VALUE lines from ``config/seed.env``, then ``config/codeagent.env``.
 
+    When ``seed.env`` is missing, only ``codeagent.env`` is loaded (legacy layout).
     Skips any key already present in ``os.environ`` so the shell/export wins.
     """
     root = project_root() if base is None else base.resolve()
@@ -59,6 +61,7 @@ def apply_seed_env_from_config(base: Optional[Path] = None) -> None:
     leg = cfg / LEGACY_ENV_FILENAME
     if seed_p.is_file():
         _load_env_file(seed_p)
+        _load_env_file(leg)
     elif leg.is_file():
         _load_env_file(leg)
 
