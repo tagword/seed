@@ -16,6 +16,9 @@ _episodic_project_id: ContextVar[str] = ContextVar("episodic_project_id", defaul
 _project_workspace_cwd: ContextVar[Optional[str]] = ContextVar(
     "project_workspace_cwd", default=None
 )
+_instruction_bundle: ContextVar[Optional[str]] = ContextVar(
+    "instruction_bundle", default=None
+)
 
 
 def set_active_llm_session(session_id: Optional[str]) -> None:
@@ -67,3 +70,16 @@ def get_active_project_workspace_cwd() -> Optional[str]:
 
 def clear_active_project_workspace() -> None:
     _project_workspace_cwd.set(None)
+
+
+def set_active_instruction_bundle(bundle: Optional[str]) -> None:
+    b = (bundle or "").strip()
+    _instruction_bundle.set(b if b else None)
+
+
+def get_active_instruction_bundle() -> Optional[str]:
+    return _instruction_bundle.get()
+
+
+def clear_active_instruction_bundle() -> None:
+    _instruction_bundle.set(None)

@@ -222,6 +222,25 @@ def llm_executor_from_resolved(cfg: Dict[str, Any]):
     )
 
 
+def new_llm_executor_from_preset(preset_id: Optional[str] = None):
+    """Fresh ``LLMAPIExecutor`` instance (safe for concurrent tasks with different presets)."""
+    from seed.core.llm_exec import LLMAPIExecutor
+
+    cfg = resolve_preset(preset_id)
+    bu = (cfg.get("base_url") or "").strip().rstrip("/") or "http://127.0.0.1:8000/v1"
+    mod = (cfg.get("model") or "").strip() or "mock"
+    pk = (cfg.get("api_key") or "").strip() or None
+    scheme = (cfg.get("auth_scheme") or "").strip() or "Bearer"
+    mt = int(cfg.get("max_tokens") or 8192)
+    return LLMAPIExecutor(
+        baseURL=bu,
+        model=mod,
+        api_key=pk,
+        auth_scheme=scheme,
+        maxOutputTokens=mt,
+    )
+
+
 def _env_config_dict() -> Dict[str, Any]:
     return {
         "base_url": _ea.pick_nonempty(*_ea.LLM_BASEURL).rstrip("/"),
