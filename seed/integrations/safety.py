@@ -54,8 +54,27 @@ class SafetyConfig:
         raw = (pick_default("", *SAFETY_BASH_ALLOWED_DIRS) or "").strip()
         if not raw:
             root = pick_nonempty(*PROJECT_ROOT)
-            return [root] if root else []
-        return [p.strip() for p in raw.split(";") if p.strip()]
+            dirs: List[str] = [root] if root else []
+        else:
+            dirs = [p.strip() for p in raw.split(";") if p.strip()]
+
+        # Web UI project workspace (external repo path) — allow bash default cwd there.
+        try:
+            from seed.core.agent_context import get_active_project_workspace_cwd
+
+            ws = (get_active_project_workspace_cwd() or "").strip()
+            if ws:
+                resolved_ws = str(Path(ws).expanduser().resolve())
+                covered = any(
+                    resolved_ws.startswith(str(Path(d).expanduser().resolve()))
+                    for d in dirs
+                )
+                if not covered:
+                    dirs.append(resolved_ws)
+        except Exception:
+            pass
+
+        return dirs
 
 
 # ---------------------------------------------------------------------------

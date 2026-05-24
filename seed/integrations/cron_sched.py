@@ -224,7 +224,9 @@ async def _run_cron_job_async(job: Dict[str, Any]) -> None:
         default_system_prompt,
         maybe_compact_context_messages,
         merge_llm_tail_into_full,
+        persist_compact_summary,
         run_llm_tool_loop,
+        strip_ephemeral_message_fields,
     )
     from seed.core.agent_context import clear_active_project_episodic, set_active_llm_session
     from seed.core.llm_exec import LLMError
@@ -297,7 +299,9 @@ async def _run_cron_job_async(job: Dict[str, Any]) -> None:
             max_user_rounds=max_hist,
             skills_suffix=None,
         )
-        maybe_compact_context_messages(api_msgs, llm)
+        compact_result = maybe_compact_context_messages(api_msgs, llm)
+        persist_compact_summary(chat_sess.messages, compact_result)
+        strip_ephemeral_message_fields(api_msgs)
         try:
             from seed.core.paths import agent_memory_dir
 
@@ -660,7 +664,9 @@ def run_cron_job_sync(job: Dict[str, Any]) -> None:
         default_system_prompt,
         maybe_compact_context_messages,
         merge_llm_tail_into_full,
+        persist_compact_summary,
         run_llm_tool_loop,
+        strip_ephemeral_message_fields,
     )
     from seed.core.agent_context import clear_active_project_episodic, set_active_llm_session
     from seed.core.llm_exec import LLMError
@@ -728,7 +734,9 @@ def run_cron_job_sync(job: Dict[str, Any]) -> None:
             max_user_rounds=max_hist,
             skills_suffix=None,
         )
-        maybe_compact_context_messages(api_msgs, llm)
+        compact_result = maybe_compact_context_messages(api_msgs, llm)
+        persist_compact_summary(chat_sess.messages, compact_result)
+        strip_ephemeral_message_fields(api_msgs)
         try:
             from seed.core.paths import agent_memory_dir
 

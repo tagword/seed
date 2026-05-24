@@ -502,6 +502,69 @@ def _clean_orphaned_tool_calls(messages: List[Dict[str, Any]]) -> None:
         i -= 1
 
 
+_AUTO_CONTINUE_NUDGE_PREFIXES = (
+    "请继续完成未完成事项",
+    "上一段连续在",
+)
+
+_EPHEMERAL_MESSAGE_KEYS = (
+    "_source_idx",
+    "_auto_continue_nudge",
+)
+
+
+def _is_auto_continue_nudge_message(message: Dict[str, Any]) -> bool:
+    if message.get("_auto_continue_nudge"):
+        return True
+    if message.get("role") != "user":
+        return False
+    content = message.get("content")
+    if not isinstance(content, str):
+        return False
+    return any(content.startswith(prefix) for prefix in _AUTO_CONTINUE_NUDGE_PREFIXES)
+
+
+def _user_round_indices(body: List[Dict[str, Any]]) -> List[int]:
+    """User-started blocks, excluding auto-continue nudge injections."""
+    return [
+        i
+        for i, m in enumerate(body)
+        if isinstance(m, dict)
+        and m.get("role") == "user"
+        and not _is_auto_continue_nudge_message(m)
+    ]
+
+
+def strip_ephemeral_message_fields(messages: List[Dict[str, Any]]) -> None:
+    """Remove in-memory-only metadata before LLM/tool persistence."""
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        for key in _EPHEMERAL_MESSAGE_KEYS:
+            message.pop(key, None)
+
+
+def persist_compact_summary(
+    full_messages: List[Dict[str, Any]],
+    compact_result: Optional[Dict[str, Any]],
+) -> bool:
+    """Write compact summary onto the correct message in persisted history."""
+    if not compact_result or not full_messages:
+        return False
+    summary = compact_result.get("compact_summary")
+    if not isinstance(summary, str) or not summary.strip():
+        return False
+    raw_idx = compact_result.get("boundary_source_idx", compact_result.get("boundary_idx"))
+    try:
+        idx = int(raw_idx)
+    except (TypeError, ValueError):
+        return False
+    if 0 <= idx < len(full_messages):
+        full_messages[idx]["_compact_summary"] = summary.strip()
+        return True
+    return False
+
+
 def build_api_projection_messages(
     full_messages: List[Dict[str, Any]],
     *,
@@ -528,6 +591,9 @@ def build_api_projection_messages(
     import copy as _copy
 
     api = _copy.deepcopy(full_messages)
+    for i, message in enumerate(api):
+        if isinstance(message, dict):
+            message["_source_idx"] = i
 
     # ── 会话游标 ──
     _cursor = cursor or {}
@@ -582,17 +648,31 @@ def merge_llm_tail_into_full(
     """Append messages produced during ``run_llm_tool_loop`` (``api_messages[n_before_llm:]``) onto ``full_messages``."""
     if n_before_llm < 0:
         n_before_llm = 0
-    tail = api_messages[n_before_llm:]
+    tail = [
+        message
+        for message in api_messages[n_before_llm:]
+        if not (isinstance(message, dict) and _is_auto_continue_nudge_message(message))
+    ]
     if tail:
         # If the last message in full is a streaming placeholder and tail starts
         # with an assistant message, replace the placeholder to avoid duplicate.
         if (full_messages
                 and full_messages[-1].get("_streaming")
                 and tail[0].get("role") == "assistant"):
-            full_messages[-1] = tail[0]
-            full_messages.extend(tail[1:])
-        else:
-            full_messages.extend(tail)
+            persisted = dict(tail[0])
+            strip_ephemeral_message_fields([persisted])
+            full_messages[-1] = persisted
+            tail = tail[1:]
+        if tail:
+            persisted_tail = []
+            for message in tail:
+                if not isinstance(message, dict):
+                    persisted_tail.append(message)
+                    continue
+                copied = dict(message)
+                strip_ephemeral_message_fields([copied])
+                persisted_tail.append(copied)
+            full_messages.extend(persisted_tail)
     return tail
 
 
@@ -609,7 +689,7 @@ def trim_messages_by_user_rounds(
     has_system = bool(messages and messages[0].get("role") == "system")
     body_start = 1 if has_system else 0
     body = messages[body_start:]
-    user_idx = [i for i, m in enumerate(body) if m.get("role") == "user"]
+    user_idx = _user_round_indices(body)
     if len(user_idx) <= max_user_rounds:
         return messages
     cut = user_idx[len(user_idx) - max_user_rounds]
@@ -845,7 +925,7 @@ def maybe_compact_context_messages(
     # Determine if compaction should trigger: either bytes exceed threshold,
     # or user rounds exceed the round-based threshold.
     body = messages[body_start:]
-    user_idx = [i for i, m in enumerate(body) if m.get("role") == "user"]
+    user_idx = _user_round_indices(body)
     exceeds_bytes = cur_bytes >= min_bytes
     exceeds_rounds = (min_rounds > 0) and (len(user_idx) >= min_rounds)
 
@@ -853,9 +933,13 @@ def maybe_compact_context_messages(
         return None
 
     if len(user_idx) <= keep_rounds:
-        return None
+        if not exceeds_bytes or len(user_idx) <= 1:
+            return None
+        effective_keep = max(1, len(user_idx) - 1)
+    else:
+        effective_keep = keep_rounds
 
-    cut = user_idx[len(user_idx) - keep_rounds]
+    cut = user_idx[len(user_idx) - effective_keep]
     old = body[:cut]
     recent = body[cut:]
     if not old:
@@ -926,8 +1010,18 @@ def maybe_compact_context_messages(
     if _prior_summary:
         combined = _prior_summary + "\n\n[continued]\n\n" + summary
 
-    # 写入 _compact_summary 到边界消息（old 中最后一条）
-    old[-1]["_compact_summary"] = combined
+    boundary_message = old[-1]
+    boundary_source_idx = boundary_message.get("_source_idx")
+    if boundary_source_idx is None:
+        boundary_source_idx = body_start + cut - 1
+    else:
+        try:
+            boundary_source_idx = int(boundary_source_idx)
+        except (TypeError, ValueError):
+            boundary_source_idx = body_start + cut - 1
+
+    # 写入 _compact_summary 到边界消息（old 中最后一条，投影副本）
+    boundary_message["_compact_summary"] = combined
 
     sys_msg = messages[0]
     base = strip_compact_block_from_system(str(sys_msg.get("content") or ""))
@@ -944,7 +1038,7 @@ def maybe_compact_context_messages(
         {
             "type": "context_compact",
             "dropped_messages": int(len(old)),
-            "kept_user_rounds": int(keep_rounds),
+            "kept_user_rounds": int(effective_keep),
             "summary_chars": int(len(combined)),
             "compact_min_bytes": int(min_bytes),
             "body_bytes_before": int(cur_bytes),
@@ -963,23 +1057,22 @@ def maybe_compact_context_messages(
     logger.info(
         "Context compact: dropped %s messages, kept %s user rounds verbatim",
         len(old),
-        keep_rounds,
+        effective_keep,
     )
 
     # ── 返回压缩信息供调用者写回 chat_sess.messages ──
     return {
-        "boundary_idx": body_start + cut - 1,  # 边界消息在 messages 中的索引
+        "boundary_idx": body_start + cut - 1,  # 边界消息在投影 messages 中的索引
+        "boundary_source_idx": boundary_source_idx,  # 边界消息在 full_messages 中的索引
         "compact_summary": combined,
         "dropped_count": len(old),
     }
 
 
-def _truncate_tool_output(text: str) -> str:
-    max_c = int(_ea.pick_default("48000", *_ea.TOOL_OUTPUT_MAX_CHARS))
-    if max_c <= 0 or len(text) <= max_c:
-        return text
-    drop = len(text) - max_c
-    return text[:max_c] + f"\n...[truncated {drop} chars for context limit]"
+def _truncate_tool_output(text: str, *, tool_name: str = "tool") -> str:
+    from seed.core.tool_output_cap import cap_tool_output_for_context
+
+    return cap_tool_output_for_context(text, tool_name=tool_name)
 
 
 """OpenAI-style chat completions loop with tool execution."""
@@ -1174,6 +1267,8 @@ async def run_llm_tool_loop(
                 except Exception as e:
                     logger.exception("tool %s failed", name)
                     out = f"Error executing tool {name!r}: {e}"
+
+                out = _truncate_tool_output(out, tool_name=name)
 
                 snippet = out if len(out) <= 4000 else out[:4000] + "…"
                 row["result"] = snippet
