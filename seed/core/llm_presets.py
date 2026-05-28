@@ -120,6 +120,12 @@ def save_presets(presets: List[Dict[str, Any]]) -> None:
             val = p.get(k)
             if val is not None:
                 entry[k] = str(val).strip() if isinstance(val, str) else val
+        if p.get("supports_vision") is True:
+            entry["supports_vision"] = True
+        if p.get("supports_image_gen") is True:
+            entry["supports_image_gen"] = True
+        if p.get("supports_audio") is True:
+            entry["supports_audio"] = True
         if p.get("max_tokens") is not None:
             try:
                 entry["max_tokens"] = int(p["max_tokens"])

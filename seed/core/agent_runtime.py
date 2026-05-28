@@ -765,13 +765,15 @@ def build_context_usage_snapshot(
 
 
 def _format_transcript_for_summary(chunks: List[Dict[str, Any]], max_chars: int) -> str:
+    from seed.core.llm_exec import msg_text_to_str
+
     lines: List[str] = []
     for m in chunks:
         role = m.get("role", "?")
         content = m.get("content")
         if content is None and m.get("tool_calls"):
             content = json.dumps(m.get("tool_calls"), ensure_ascii=False)[:2000]
-        text = (content or "").strip()
+        text = msg_text_to_str(content).strip()
         if len(text) > 8000:
             text = text[:4000] + "\n...[mid omitted]...\n" + text[-4000:]
         lines.append(f"### {role}\n{text}\n")

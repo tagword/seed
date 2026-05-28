@@ -661,6 +661,9 @@ def _msg_text_to_str(raw: Any) -> str:
     return str(raw)
 
 
+msg_text_to_str = _msg_text_to_str
+
+
 def _extract_tool_calls(msg: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Parse tool_calls; tolerate missing ids or oddly-shaped function payloads."""
     raw = msg.get("tool_calls")

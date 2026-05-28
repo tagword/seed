@@ -19,6 +19,10 @@ _project_workspace_cwd: ContextVar[Optional[str]] = ContextVar(
 _instruction_bundle: ContextVar[Optional[str]] = ContextVar(
     "instruction_bundle", default=None
 )
+_vision_preset_id: ContextVar[str] = ContextVar("vision_preset_id", default="")
+_image_gen_preset_id: ContextVar[str] = ContextVar("image_gen_preset_id", default="")
+_audio_preset_id: ContextVar[str] = ContextVar("audio_preset_id", default="")
+_active_agent_id: ContextVar[str] = ContextVar("active_agent_id", default="")
 
 
 def set_active_llm_session(session_id: Optional[str]) -> None:
@@ -83,3 +87,51 @@ def get_active_instruction_bundle() -> Optional[str]:
 
 def clear_active_instruction_bundle() -> None:
     _instruction_bundle.set(None)
+
+
+def set_active_vision_preset(preset_id: Optional[str]) -> None:
+    _vision_preset_id.set((preset_id or "").strip())
+
+
+def get_active_vision_preset() -> str:
+    return _vision_preset_id.get() or ""
+
+
+def clear_active_vision_preset() -> None:
+    _vision_preset_id.set("")
+
+
+def set_active_image_gen_preset(preset_id: Optional[str]) -> None:
+    _image_gen_preset_id.set((preset_id or "").strip())
+
+
+def get_active_image_gen_preset() -> str:
+    return _image_gen_preset_id.get() or ""
+
+
+def clear_active_image_gen_preset() -> None:
+    _image_gen_preset_id.set("")
+
+
+def set_active_audio_preset(preset_id: Optional[str]) -> None:
+    _audio_preset_id.set((preset_id or "").strip())
+
+
+def get_active_audio_preset() -> str:
+    return _audio_preset_id.get() or ""
+
+
+def clear_active_audio_preset() -> None:
+    _audio_preset_id.set("")
+
+
+def set_active_agent_id(agent_id: Optional[str]) -> None:
+    _active_agent_id.set((agent_id or "").strip() or "default")
+
+
+def get_active_agent_id() -> str:
+    return _active_agent_id.get() or "default"
+
+
+def clear_active_agent_id() -> None:
+    _active_agent_id.set("")
