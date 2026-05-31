@@ -1,4 +1,4 @@
-"""Integrations: browser, safety bridge, webhooks, transcripts, messaging — depend on ``seed.core``."""
+"""Integrations: browser, safety bridge, webhooks, messaging — depend on ``seed.core``."""
 
 from seed.integrations.browser import BROWSER, ensure_browser_running, BrowserError
 from seed.integrations.safety import (
@@ -18,8 +18,6 @@ from seed.integrations.webhook_dedup import (
 # HTTP / UI helpers (depend on seed.core for sessions and LLM types)
 from seed.integrations.message_api import to_openai_chat_payload
 from seed.integrations.session_title import llm_generate_display_title, maybe_llm_refresh_session_title
-from seed.integrations.transcript_store import transcript_jsonl_path, append_transcript_entries
-
 __all__ = (
     "BROWSER",
     "ensure_browser_running",
@@ -36,6 +34,4 @@ __all__ = (
     "to_openai_chat_payload",
     "llm_generate_display_title",
     "maybe_llm_refresh_session_title",
-    "transcript_jsonl_path",
-    "append_transcript_entries",
 )

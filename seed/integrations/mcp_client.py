@@ -10,14 +10,14 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from seed.core.env_access import MCP_ENABLED, env_truthy, pick_default
+from seed.core.env_access import MCP_ENABLED, MCP_INIT_TIMEOUT, env_truthy, pick_default
 from seed.integrations.mcp_config import MCPServerConfig, get_server_config, list_server_configs
 
 logger = logging.getLogger(__name__)
 
 _PROTOCOL_VERSION = "2024-11-05"
 _CLIENT_NAME = "seed"
-_CLIENT_VERSION = "1.0.3"
+_CLIENT_VERSION = "1.0.4"
 
 
 class MCPError(Exception):
@@ -46,6 +46,29 @@ class MCPStdioSession:
         self._lock = threading.Lock()
         self._req_id = 0
         self._ready = False
+        self._stderr_thread: Optional[threading.Thread] = None
+
+    def _attach_stderr_drain(self) -> None:
+        """Prevent subprocess blocking when uvx/MCP writes progress to stderr."""
+        proc = self._proc
+        if proc is None or proc.stderr is None:
+            return
+        if self._stderr_thread is not None and self._stderr_thread.is_alive():
+            return
+        sid = self.cfg.server_id
+
+        def _drain() -> None:
+            try:
+                assert proc.stderr is not None
+                for line in proc.stderr:
+                    s = line.rstrip()
+                    if s:
+                        logger.info("MCP %s stderr: %s", sid, s[:800])
+            except Exception:
+                logger.debug("MCP %s stderr drain ended", sid, exc_info=True)
+
+        self._stderr_thread = threading.Thread(target=_drain, daemon=True)
+        self._stderr_thread.start()
 
     def _start(self) -> None:
         if self._proc is not None and self._proc.poll() is None:
@@ -66,6 +89,7 @@ class MCPStdioSession:
             )
         except OSError as e:
             raise MCPError(f"Failed to start MCP server {self.cfg.server_id}: {e}") from e
+        self._attach_stderr_drain()
         self._ready = False
         self._initialize()
 
@@ -98,7 +122,12 @@ class MCPStdioSession:
         t.start()
         t.join(timeout)
         if t.is_alive():
-            raise MCPError(f"MCP read timeout ({timeout}s) on {self.cfg.server_id}")
+            hint = (
+                f"MCP read timeout ({timeout}s) on {self.cfg.server_id}. "
+                "首次用 uvx 拉包可能要 1–3 分钟，请增大 SEED_MCP_INIT_TIMEOUT 或先在终端执行："
+                f" {' '.join(self.cfg.argv())}"
+            )
+            raise MCPError(hint)
         line = box[0]
         if line is None or line == "":
             raise MCPError(f"MCP server {self.cfg.server_id} closed stdout")
@@ -144,6 +173,8 @@ class MCPStdioSession:
         self._write({"jsonrpc": "2.0", "method": method, "params": params or {}})
 
     def _initialize(self) -> None:
+        init_timeout = float(pick_default("180", *MCP_INIT_TIMEOUT) or "180")
+        init_timeout = max(30.0, min(init_timeout, 600.0))
         result = self._request(
             "initialize",
             {
@@ -151,7 +182,7 @@ class MCPStdioSession:
                 "capabilities": {},
                 "clientInfo": {"name": _CLIENT_NAME, "version": _CLIENT_VERSION},
             },
-            timeout=30.0,
+            timeout=init_timeout,
         )
         if not isinstance(result, dict):
             raise MCPError("initialize returned invalid result")
@@ -266,7 +297,7 @@ class MCPClientManager:
         for s in sessions:
             s.close()
 
-    def list_servers_status(self) -> List[Dict[str, Any]]:
+    def list_servers_status(self, *, probe: bool = False) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
         for cfg in list_server_configs():
             row: Dict[str, Any] = {
@@ -281,6 +312,15 @@ class MCPClientManager:
                 sess = self._sessions.get(cfg.server_id)
             if sess and sess._proc is not None and sess._proc.poll() is None:
                 row["connected"] = bool(sess._ready)
+            if probe and cfg.enabled and mcp_globally_enabled():
+                try:
+                    tools = self.get_session(cfg.server_id).list_tools()
+                    row["connected"] = True
+                    row["tool_count"] = len(tools)
+                    row["tools"] = [t.name for t in tools]
+                except Exception as e:
+                    row["connected"] = False
+                    row["last_error"] = str(e)
             out.append(row)
         return out
 
@@ -303,3 +343,19 @@ def reset_mcp_manager() -> None:
         if _manager is not None:
             _manager.close_all()
             _manager = None
+
+
+def probe_mcp_server_config(cfg: MCPServerConfig) -> Dict[str, Any]:
+    """Start a one-off session, list tools, then close (for Web UI test)."""
+    sess = MCPStdioSession(cfg)
+    try:
+        tools = sess.list_tools()
+        return {
+            "ok": True,
+            "tool_count": len(tools),
+            "tools": [t.name for t in tools],
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    finally:
+        sess.close()

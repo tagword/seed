@@ -17,9 +17,9 @@ def _safe_segment(name: str, *, max_len: int = 64) -> str:
 
 
 def attachments_root(agent_id: str) -> Path:
-    from seed.core.llm_sess import llm_sessions_dir
+    from seed.core.llm_sess import agent_sessions_dir
 
-    root = llm_sessions_dir(agent_id) / "attachments"
+    root = agent_sessions_dir(agent_id) / "attachments"
     root.mkdir(parents=True, exist_ok=True)
     return root
 

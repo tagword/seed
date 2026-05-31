@@ -2,7 +2,7 @@
 Seed — kernel + integrations (``pip install seed``).
 
 - ``seed.core`` — orchestrator, sessions, memory, LLM, paths, tool runtime contracts, etc.
-- ``seed.integrations`` — browser, safety bridge, webhooks, transcripts, cron, env file, …
+- ``seed.integrations`` — browser, safety bridge, webhooks, cron, env file, …
 
 Builtin tool **implementations** live in the separate ``seed-tools`` distribution (``import seed_tools``).
 ``ToolRegistry`` / ``ToolExecutor`` **contracts** are always available from ``seed.core.tool_runtime``
@@ -24,12 +24,15 @@ from seed.core.engine import EngineConfig, QueryEngine
 from seed.core.execution import ExecutionContext, ToolExecution, ToolRegistry
 from seed.core.llm_exec import LLMAPIExecutor, LLMError
 from seed.core.llm_sess import (
-    list_stored_llm_session_ids,
-    list_stored_llm_sessions_meta,
+    agent_sessions_dir,
+    list_stored_session_ids,
+    list_stored_sessions_meta,
     load_chat_session_from_disk,
     load_or_create_chat_session,
-    llm_sessions_dir,
+    load_session_messages,
+    migrate_legacy_agent_sessions,
     persist_chat_session,
+    save_session_messages,
 )
 from seed.core.mem_sys import MemorySystem, MemorySystemError
 from seed.integrations.safety import (
@@ -44,7 +47,6 @@ from seed.core.turn_loop import AutonomousAgent, TurnLoopConfig, TurnLoopEngine
 from seed.integrations import (
     BROWSER,
     BrowserError,
-    append_transcript_entries,
     compute_webhook_dedup_key,
     dedup_enabled,
     ensure_browser_running,
@@ -52,7 +54,6 @@ from seed.integrations import (
     maybe_llm_refresh_session_title,
     reset_webhook_dedup_cache,
     to_openai_chat_payload,
-    transcript_jsonl_path,
     try_acquire,
     try_acquire_report,
     check_bash_command as services_check_bash,
@@ -98,12 +99,15 @@ __all__ = [
     "sanitize_tool_output",
     "check_bash_command",
     "enforce_bash_timeout",
-    "llm_sessions_dir",
-    "list_stored_llm_sessions_meta",
-    "list_stored_llm_session_ids",
+    "agent_sessions_dir",
+    "list_stored_sessions_meta",
+    "list_stored_session_ids",
     "load_chat_session_from_disk",
     "load_or_create_chat_session",
+    "load_session_messages",
+    "migrate_legacy_agent_sessions",
     "persist_chat_session",
+    "save_session_messages",
     "BROWSER",
     "ensure_browser_running",
     "BrowserError",
@@ -115,12 +119,10 @@ __all__ = [
     "to_openai_chat_payload",
     "llm_generate_display_title",
     "maybe_llm_refresh_session_title",
-    "transcript_jsonl_path",
-    "append_transcript_entries",
     "SeedToolRegistry",
     "ToolExecutor",
     "ToolExecutionError",
     "setup_builtin_tools",
 ]
 
-__version__ = "1.0.2"
+__version__ = "1.0.4"

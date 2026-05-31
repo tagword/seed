@@ -197,7 +197,7 @@ def ensure_default_config_files(base: Optional[Path] = None) -> None:
 # SEED_CONTEXT_SUMMARIZER_MAX_INPUT=120000
 #
 # Memory / agent continuity (LLM/HTTP 会话文件为完整 Session JSON，与 TurnLoop 使用的 models.Session 一致)
-# SEED_LLM_SESSIONS_DIR=/path/to/custom/llm_sessions  （未设置时：<project>/agents/<agent_id>/sessions/llm_sessions）
+# SEED_AGENT_SESSIONS_DIR=/path/to/custom/sessions  （未设置时：<project>/agents/<agent_id>/sessions；SEED_LLM_SESSIONS_DIR 仍兼容）
 # SEED_MEMORY_LOG=1
 # SEED_MEMORY_INJECT=1
 # SEED_MEMORY_INJECT_MAX_CHARS=5000
@@ -207,13 +207,10 @@ def ensure_default_config_files(base: Optional[Path] = None) -> None:
 # SEED_CRON_EXPERIENCE_SKIP_DUPLICATE=1  — 与「同 job + 同 session」下最近一条 outcome 全文一致则不再写新文件
 # SEED_CRON_EXPERIENCE_TTL_SECONDS=172800  — 每条 cron 经验附加 ## TTL（秒，自文件 mtime）；过期后 memory_bridge 不再注入
 #
-# 会话全文账本（JSONL，与 Session JSON 并行；trim/compact 只影响进模型的投影）
-# SEED_TRANSCRIPT=1
-#
-# Web UI 载入会话：按「用户对话块」分页（每条 user 起一块，直到下一条 user）。首屏只拉最近 N 块，上滑到顶再拉更早。
-# SEED_WEBUI_TRANSCRIPT_USER_BLOCKS=10
-# SEED_WEBUI_TRANSCRIPT_MAX_MESSAGES=300   # 单次响应最多返回多少条 user/assistant 行（防止单块极大撑爆）
-# SEED_WEBUI_TRANSCRIPT_MAX_CHARS=12000    # 单条消息正文上限
+# Web UI 会话历史（GET /api/ui/session/history，从 Session JSON 投影；trim/compact 只影响进模型）：
+# CODEAGENT_WEBUI_SESSION_HISTORY_USER_BLOCKS=10
+# CODEAGENT_WEBUI_SESSION_HISTORY_MAX_MESSAGES=300
+# CODEAGENT_WEBUI_SESSION_HISTORY_MAX_CHARS=12000
 #
 # memory_search 默认跳过已过期的 experience（与 episodic 注入一致）；若要搜过期项：
 # SEED_MEMORY_SEARCH_INCLUDE_EXPIRED=1
@@ -252,6 +249,8 @@ def ensure_default_config_files(base: Optional[Path] = None) -> None:
 # SEED_ORCHESTRATOR_AUTO_SPLIT=0     # split user message on --- or numbered lists
 # SEED_SAFETY_PROFILE=moderate        # 安全等级：strict / moderate / permissive
 # SEED_SAFETY_AUDIT_LOG=0             # 启用安全事件审计日志（config/audit_log.jsonl）
+# SEED_LLM_PROJECTION_AUDIT=0         # 每轮 LLM 请求前写入完整 messages 快照（sessions/_audit/<id>/）
+# SEED_LLM_PROJECTION_AUDIT_DIR=      # 可选：审计根目录（默认与会话 JSON 同级的 _audit/）
 #
 """,
         "bootstrap.md": """# Seed 首次启动引导（bootstrap）

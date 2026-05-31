@@ -67,22 +67,25 @@ def run_shell(
     *,
     timeout: int = 30,
     cwd: Optional[str] = None,
+    detach: bool = False,
 ) -> Tuple[int, str]:
     """
     Run a shell command. Returns ``(returncode, combined_output)``.
 
     Safety checks (``check_bash_command``) must be applied by the caller before this.
+    When ``detach=True``, the command runs in the background and the call returns
+    immediately with the process PID (or an error).
     """
     backend = resolve_exec_backend()
     work = _resolve_cwd(cwd)
     if backend == "docker":
-        code, out = _run_docker(command, timeout=timeout, cwd=work)
+        code, out = _run_docker(command, timeout=timeout, cwd=work, detach=detach)
         if code == -2:
             # docker missing at runtime — fall back
-            code, out = _run_local(command, timeout=timeout, cwd=work)
+            code, out = _run_local(command, timeout=timeout, cwd=work, detach=detach)
             out = _FALLBACK_NOTE + out
         return code, out
-    return _run_local(command, timeout=timeout, cwd=work)
+    return _run_local(command, timeout=timeout, cwd=work, detach=detach)
 
 
 def _resolve_cwd(cwd: Optional[str]) -> Path:
@@ -100,7 +103,24 @@ def _windows_no_window_kwargs() -> dict:
     return {"startupinfo": si, "creationflags": 0x08000000}
 
 
-def _run_local(command: str, timeout: int, cwd: Path) -> Tuple[int, str]:
+def _run_local(command: str, timeout: int, cwd: Path, detach: bool = False) -> Tuple[int, str]:
+    if detach:
+        # Detached background execution: spawn and forget
+        kwargs = {
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "stdin": subprocess.DEVNULL,
+            "close_fds": True,
+        }
+        if os.name == "nt":
+            # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP = silent background
+            kwargs["startupinfo"] = _windows_no_window_kwargs()["startupinfo"]
+            kwargs["creationflags"] = 0x08000000 | 0x00000200
+        else:
+            kwargs["start_new_session"] = True
+        proc = subprocess.Popen(command, shell=True, cwd=str(cwd), **kwargs)
+        return 0, f"Detached PID: {proc.pid}"
+
     try:
         result = subprocess.run(
             command,
@@ -119,7 +139,7 @@ def _run_local(command: str, timeout: int, cwd: Path) -> Tuple[int, str]:
         return -1, f"Error executing command: {e}"
 
 
-def _run_docker(command: str, timeout: int, cwd: Path) -> Tuple[int, str]:
+def _run_docker(command: str, timeout: int, cwd: Path, detach: bool = False) -> Tuple[int, str]:
     if not docker_available():
         return -2, "Docker is not available"
 
@@ -142,7 +162,29 @@ def _run_docker(command: str, timeout: int, cwd: Path) -> Tuple[int, str]:
     ]
     if network:
         docker_cmd.extend(["--network", network])
-    docker_cmd.extend([image, "sh", "-lc", command])
+    if detach:
+        # Background: detach mode — no timeout enforcement, return container ID
+        docker_cmd.insert(2, "-d")  # docker run -d
+        docker_cmd.extend(["image", "sh", "-lc", command])
+        try:
+            result = subprocess.run(
+                docker_cmd,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            output = result.stdout.strip() if result.stdout else ""
+            if result.returncode != 0:
+                return result.returncode, f"docker run -d failed: {result.stderr or 'unknown error'}"
+            return 0, f"Detached container: {output}"
+        except subprocess.TimeoutExpired:
+            return -1, "Docker detach command timed out"
+        except FileNotFoundError:
+            return -2, "docker binary not found"
+        except Exception as e:
+            return -1, f"Docker detach error: {e}"
+    else:
+        docker_cmd.extend([image, "sh", "-lc", command])
 
     try:
         result = subprocess.run(

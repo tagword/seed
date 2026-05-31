@@ -108,6 +108,87 @@ def get_server_config(server_id: str, base: Optional[Path] = None) -> Optional[M
     return None
 
 
+def server_config_from_dict(server_id: str, entry: Dict[str, Any]) -> MCPServerConfig:
+    """Parse API / form payload into ``MCPServerConfig``."""
+    if not isinstance(entry, dict):
+        raise ValueError("server entry must be an object")
+    sid = str(server_id or entry.get("id") or "").strip()
+    if not sid:
+        raise ValueError("server id required")
+    args = entry.get("args")
+    env = entry.get("env")
+    return MCPServerConfig(
+        server_id=sid,
+        enabled=bool(entry.get("enabled", True)),
+        transport=str(entry.get("transport") or "stdio").strip().lower() or "stdio",
+        command=str(entry.get("command") or "").strip(),
+        args=[str(x) for x in args] if isinstance(args, list) else [],
+        env={str(k): str(v) for k, v in env.items()} if isinstance(env, dict) else {},
+        cwd=str(entry["cwd"]).strip() if entry.get("cwd") else None,
+    )
+
+
+def minimax_mcp_output_dir(base: Optional[Path] = None) -> Path:
+    """Writable directory for MiniMax Token Plan MCP (``MINIMAX_MCP_BASE_PATH``)."""
+    root = project_root() if base is None else Path(base).resolve()
+    return root / "mcp-minimax-out"
+
+
+MINIMAX_MCP_SERVER_ID = "MiniMax"
+
+
+def build_minimax_token_plan_mcp_server(
+    *,
+    api_key: str,
+    api_host: str = "https://api.minimaxi.com",
+    uvx_command: str = "uvx",
+    base: Optional[Path] = None,
+    resource_mode: str = "",
+) -> Dict[str, Any]:
+    """
+    Stdio MCP entry for ``uvx minimax-coding-plan-mcp`` (``understand_image``, ``web_search``).
+    See https://platform.minimaxi.com/docs/guides/token-plan-mcp-guide
+    """
+    out_dir = minimax_mcp_output_dir(base)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    env: Dict[str, str] = {
+        "MINIMAX_API_KEY": (api_key or "").strip(),
+        "MINIMAX_API_HOST": (api_host or "https://api.minimaxi.com").strip().rstrip("/"),
+        "MINIMAX_MCP_BASE_PATH": str(out_dir),
+    }
+    mode = (resource_mode or "").strip().lower()
+    if mode in ("url", "local"):
+        env["MINIMAX_API_RESOURCE_MODE"] = mode
+    return {
+        "enabled": True,
+        "transport": "stdio",
+        "command": (uvx_command or "uvx").strip() or "uvx",
+        "args": ["minimax-coding-plan-mcp", "-y"],
+        "env": env,
+    }
+
+
+def merge_minimax_mcp_server(
+    servers: Dict[str, Any],
+    *,
+    api_key: str,
+    api_host: str = "https://api.minimaxi.com",
+    uvx_command: str = "uvx",
+    base: Optional[Path] = None,
+    resource_mode: str = "",
+) -> Dict[str, Any]:
+    """Return ``servers`` with/overwriting the MiniMax Token Plan MCP entry."""
+    out = dict(servers) if isinstance(servers, dict) else {}
+    out[MINIMAX_MCP_SERVER_ID] = build_minimax_token_plan_mcp_server(
+        api_key=api_key,
+        api_host=api_host,
+        uvx_command=uvx_command,
+        base=base,
+        resource_mode=resource_mode,
+    )
+    return out
+
+
 def ensure_default_mcp_config(base: Optional[Path] = None) -> None:
     path = mcp_config_path(base)
     if path.is_file():

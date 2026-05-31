@@ -696,16 +696,40 @@ def _default_user_data_dir_for_debug(browser: str, port: int) -> str:
 
 
 def _system_user_data_dir(browser: str) -> str:
-    local = os.environ.get("LOCALAPPDATA", "").strip()
+    b = (browser or "").strip().lower()
     home = os.path.expanduser("~")
+    if sys.platform == "darwin":
+        if b == "edge":
+            return os.path.join(home, "Library", "Application Support", "Microsoft Edge")
+        return os.path.join(home, "Library", "Application Support", "Google", "Chrome")
+    if sys.platform.startswith("linux"):
+        if b == "edge":
+            return os.path.join(home, ".config", "microsoft-edge")
+        return os.path.join(home, ".config", "google-chrome")
+    local = os.environ.get("LOCALAPPDATA", "").strip()
     base = local or os.path.join(home, "AppData", "Local")
-    if (browser or "").strip().lower() == "edge":
+    if b == "edge":
         return os.path.join(base, "Microsoft", "Edge", "User Data")
     return os.path.join(base, "Google", "Chrome", "User Data")
 
 
+def _browser_process_names(browser: str) -> List[str]:
+    b = (browser or "").strip().lower()
+    if sys.platform == "darwin":
+        if b == "edge":
+            return ["Microsoft Edge", "msedge"]
+        return ["Google Chrome", "Chromium", "chrome"]
+    if sys.platform.startswith("linux"):
+        if b == "edge":
+            return ["microsoft-edge", "msedge"]
+        return ["google-chrome", "chromium", "chrome"]
+    if b == "edge":
+        return ["msedge.exe"]
+    return ["chrome.exe"]
+
+
 def _browser_image_name(browser: str) -> str:
-    return "msedge.exe" if (browser or "").strip().lower() == "edge" else "chrome.exe"
+    return _browser_process_names(browser)[0]
 
 
 def _extract_target_id_from_ws_url(ws_url: str) -> str:
@@ -723,27 +747,45 @@ def _extract_target_id_from_ws_url(ws_url: str) -> str:
 
 
 def _is_browser_running(browser: str) -> bool:
-    if os.name != "nt":
+    names = [n.lower() for n in _browser_process_names(browser)]
+    if os.name == "nt":
+        image = _browser_image_name(browser)
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0  # SW_HIDE
+        try:
+            r = subprocess.run(  # noqa: S603
+                ["tasklist", "/FI", f"IMAGENAME eq {image}", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                check=False,
+                startupinfo=si,
+                creationflags=0x08000000,  # CREATE_NO_WINDOW
+            )
+        except OSError:
+            return False
+        out = (r.stdout or "").strip().lower()
+        if not out:
+            return False
+        return image.lower() in out and "no tasks are running" not in out
+    from shutil import which as _which
+
+    if not _which("pgrep"):
         return False
-    image = _browser_image_name(browser)
-    si = subprocess.STARTUPINFO()
-    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-    si.wShowWindow = 0  # SW_HIDE
-    try:
-        r = subprocess.run(  # noqa: S603
-            ["tasklist", "/FI", f"IMAGENAME eq {image}", "/FO", "CSV", "/NH"],
-            capture_output=True,
-            text=True,
-            check=False,
-            startupinfo=si,
-            creationflags=0x08000000,  # CREATE_NO_WINDOW
-        )
-    except OSError:
-        return False
-    out = (r.stdout or "").strip().lower()
-    if not out:
-        return False
-    return image.lower() in out and "no tasks are running" not in out
+    for proc_name in names:
+        try:
+            r = subprocess.run(  # noqa: S603
+                ["pgrep", "-if", proc_name],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+        except OSError:
+            continue
+        if (r.stdout or "").strip():
+            return True
+    return False
 
 
 def _launch_browser_with_debug_port(

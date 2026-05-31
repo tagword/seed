@@ -51,7 +51,7 @@ def test_cap_writes_artifact_for_large_output(
     assert "artifact_read" in capped
     assert "完整输出：" in capped
 
-    artifact_root = seed_home / "agents" / "default" / "sessions" / "llm_sessions" / "_artifacts" / "test-session-cap"
+    artifact_root = seed_home / "agents" / "default" / "sessions" / "_artifacts" / "test-session-cap"
     assert artifact_root.is_dir()
     files = list(artifact_root.glob("*.txt"))
     assert files

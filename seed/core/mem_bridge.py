@@ -1,4 +1,4 @@
-"""Inject searchable episodic snippets into the system prompt; strip/regenerate each turn."""
+"""Episodic memory: project-scoped experience snippets injected at compact boundaries."""
 from __future__ import annotations
 
 import re
@@ -8,6 +8,10 @@ from typing import Any, Dict, List, Optional
 
 from seed.core import env_access as _ea
 from seed.core.mem_sys import MemorySystem
+
+_METADATA_EPISODIC_BLOCK = "episodic_block"
+_METADATA_EPISODIC_PROJECT_ID = "episodic_project_id"
+_METADATA_EPISODIC_REFRESHED_AT = "episodic_refreshed_at"
 
 
 _EPISODIC_START = "\n## Seed episodic memory (recent)\n"
@@ -171,20 +175,58 @@ def build_episodic_snippets(
     return "\n".join(parts).strip()
 
 
-def apply_episodic_to_messages(
-    messages: List[Dict[str, Any]],
-    project_root: Path,
-    session_id: Optional[str],
-    *,
-    project_id: Optional[str] = None,
-    project_scope: bool = False,
-) -> None:
-    """Mutates messages[0] system content: refresh episodic block."""
-    if not messages or messages[0].get("role") != "system":
-        return
+def episodic_memory_base(agent_id: str, project_id: Optional[str] = None) -> Path:
+    """Directory root passed to ``MemorySystem`` (``.../memory`` under agent or project)."""
+    from seed.core.paths import agent_id_default, agent_memory_dir, agent_project_data_subdir
+
+    aid = (agent_id or "").strip() or agent_id_default()
+    pid = (project_id or "").strip()
+    if pid:
+        return agent_project_data_subdir(aid, pid, "memory")
+    return agent_memory_dir(aid)
+
+
+def _utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def episodic_project_changed(metadata: Optional[Dict[str, Any]], project_id: Optional[str]) -> bool:
+    """True when a prior episodic snapshot exists and the bound project id changed."""
+    if not isinstance(metadata, dict):
+        return False
+    if _METADATA_EPISODIC_PROJECT_ID not in metadata:
+        return False
+    want = (project_id or "").strip()
+    got = str(metadata.get(_METADATA_EPISODIC_PROJECT_ID) or "").strip()
+    return got != want
+
+
+def episodic_needs_bootstrap(metadata: Optional[Dict[str, Any]]) -> bool:
+    """True when this session has never scanned experiences (first LLM turn)."""
     if _ea.pick_default("1", *_ea.MEMORY_INJECT).lower() in ("0", "false", "no"):
-        content = strip_episodic_block(str(messages[0].get("content") or ""))
-        messages[0]["content"] = content
+        return False
+    if not isinstance(metadata, dict):
+        return True
+    return _METADATA_EPISODIC_BLOCK not in metadata
+
+
+def refresh_episodic_snapshot(
+    metadata: Dict[str, Any],
+    agent_id: str,
+    session_id: Optional[str],
+    project_id: Optional[str] = None,
+) -> None:
+    """
+    Scan ``memory/experiences`` and store a frozen block on session metadata.
+
+    Called on first LLM turn (bootstrap), after context compact, or when project binding changes.
+    Not on every LLM turn thereafter.
+    """
+    pid = (project_id or "").strip()
+    if _ea.pick_default("1", *_ea.MEMORY_INJECT).lower() in ("0", "false", "no"):
+        metadata.pop(_METADATA_EPISODIC_BLOCK, None)
+        metadata.pop(_METADATA_EPISODIC_PROJECT_ID, None)
+        metadata.pop(_METADATA_EPISODIC_REFRESHED_AT, None)
         return
 
     max_c = int(_ea.pick_default("5000", *_ea.MEMORY_INJECT_MAX_CHARS))
@@ -193,16 +235,60 @@ def apply_episodic_to_messages(
         "true",
         "yes",
     )
-    block = build_episodic_snippets(
-        project_root,
+    snippets = build_episodic_snippets(
+        episodic_memory_base(agent_id, pid or None),
         session_id=session_id,
         max_chars=max_c,
         session_only=session_only,
-        project_id=project_id,
-        project_scope=project_scope,
+        project_id=pid or None,
+        project_scope=bool(pid),
     )
-    base = strip_episodic_block(str(messages[0].get("content") or ""))
-    if block:
-        messages[0]["content"] = base + _EPISODIC_START + block + _EPISODIC_END
+    if snippets:
+        metadata[_METADATA_EPISODIC_BLOCK] = _EPISODIC_START + snippets + _EPISODIC_END
     else:
+        metadata[_METADATA_EPISODIC_BLOCK] = ""
+    metadata[_METADATA_EPISODIC_PROJECT_ID] = pid
+    metadata[_METADATA_EPISODIC_REFRESHED_AT] = _utc_iso()
+
+
+def apply_persisted_episodic_to_messages(
+    messages: List[Dict[str, Any]],
+    metadata: Optional[Dict[str, Any]],
+) -> None:
+    """Append metadata episodic block to ``messages[0]`` (after compact/skills content)."""
+    if not messages or messages[0].get("role") != "system":
+        return
+    base = strip_episodic_block(str(messages[0].get("content") or ""))
+    if _ea.pick_default("1", *_ea.MEMORY_INJECT).lower() in ("0", "false", "no"):
         messages[0]["content"] = base
+        return
+    block = ""
+    if isinstance(metadata, dict):
+        raw = metadata.get(_METADATA_EPISODIC_BLOCK)
+        if isinstance(raw, str):
+            block = raw.strip()
+    messages[0]["content"] = (base + block) if block else base
+
+
+def finalize_episodic_for_llm(
+    messages: List[Dict[str, Any]],
+    metadata: Optional[Dict[str, Any]],
+    *,
+    agent_id: str,
+    session_id: Optional[str],
+    project_id: Optional[str] = None,
+    compact_happened: bool = False,
+) -> None:
+    """
+    Refresh episodic snapshot on session bootstrap, compact, or project change; apply to api messages.
+    """
+    md = metadata if isinstance(metadata, dict) else {}
+    if (
+        episodic_needs_bootstrap(md)
+        or compact_happened
+        or episodic_project_changed(md, project_id)
+    ):
+        refresh_episodic_snapshot(md, agent_id, session_id, project_id)
+    apply_persisted_episodic_to_messages(messages, md)
+
+

@@ -8,8 +8,9 @@ Each preset has::
     {
         "id": "my-deepseek",
         "name": "DeepSeek V3",
+        "provider": "deepseek",
         "base_url": "https://api.deepseek.com/v1",
-        "model": "deepseek-chat",
+        "model": "deepseek-v4-flash",
         "api_key": "sk-...",
         "auth_scheme": "Bearer",
         "max_tokens": 8192
@@ -116,16 +117,25 @@ def save_presets(presets: List[Dict[str, Any]]) -> None:
             continue
         seen.add(pid)
         entry: Dict[str, Any] = {"id": pid}
-        for k in ("name", "base_url", "model", "api_key", "auth_scheme"):
+        for k in ("name", "base_url", "model", "api_key", "auth_scheme", "provider", "use_type"):
             val = p.get(k)
             if val is not None:
                 entry[k] = str(val).strip() if isinstance(val, str) else val
+        prov = str(entry.get("provider") or "").strip()
+        if prov:
+            from seed.core.model_providers import normalize_provider_id
+
+            entry["provider"] = normalize_provider_id(prov) or prov
         if p.get("supports_vision") is True:
             entry["supports_vision"] = True
         if p.get("supports_image_gen") is True:
             entry["supports_image_gen"] = True
         if p.get("supports_audio") is True:
             entry["supports_audio"] = True
+        if p.get("supports_speech") is True:
+            entry["supports_speech"] = True
+        if p.get("supports_music") is True:
+            entry["supports_music"] = True
         if p.get("max_tokens") is not None:
             try:
                 entry["max_tokens"] = int(p["max_tokens"])
@@ -171,12 +181,20 @@ def set_default_preset_id(preset_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _preset_to_cfg(p: Dict[str, Any]) -> Dict[str, Any]:
+    from seed.core.model_providers import resolve_provider_for_preset
+
     return {
         "base_url": str(p.get("base_url") or "").rstrip("/"),
         "model": str(p.get("model") or ""),
         "api_key": str(p.get("api_key") or ""),
         "auth_scheme": str(p.get("auth_scheme") or "Bearer"),
         "max_tokens": int(p.get("max_tokens") or 8192),
+        "provider": resolve_provider_for_preset(p),
+        "supports_vision": p.get("supports_vision") is True,
+        "supports_image_gen": p.get("supports_image_gen") is True,
+        "supports_audio": p.get("supports_audio") is True,
+        "supports_speech": p.get("supports_speech") is True,
+        "supports_music": p.get("supports_music") is True,
     }
 
 
@@ -219,12 +237,14 @@ def llm_executor_from_resolved(cfg: Dict[str, Any]):
     scheme = (cfg.get("auth_scheme") or "").strip()
     mt = cfg.get("max_tokens")
     mt_arg = int(mt) if mt is not None else None
+    provider = str(cfg.get("provider") or "").strip()
     return get_llm_executor(
         baseURL=bu if bu else None,
         model=mod if mod else None,
         api_key=pk if pk else None,
         auth_scheme=scheme if scheme else None,
         max_tokens=mt_arg,
+        provider=provider or None,
     )
 
 
@@ -238,12 +258,21 @@ def new_llm_executor_from_preset(preset_id: Optional[str] = None):
     pk = (cfg.get("api_key") or "").strip() or None
     scheme = (cfg.get("auth_scheme") or "").strip() or "Bearer"
     mt = int(cfg.get("max_tokens") or 8192)
+    from seed.core.model_providers import resolve_provider_for_preset
+
+    provider = resolve_provider_for_preset(
+        {
+            "provider": cfg.get("provider"),
+            "base_url": bu,
+        }
+    )
     return LLMAPIExecutor(
         baseURL=bu,
         model=mod,
         api_key=pk,
         auth_scheme=scheme,
         maxOutputTokens=mt,
+        provider=provider,
     )
 
 

@@ -24,7 +24,7 @@ from seed.core.agent_runtime import (
 )
 from seed.core.llm_presets import new_llm_executor_from_preset
 from seed.core.llm_sess import (
-    delete_stored_llm_session,
+    delete_stored_session,
     load_or_create_chat_session,
     merge_fresh_system,
     persist_chat_session,
@@ -191,7 +191,7 @@ async def run_agent_task(ctx: RunContext) -> TaskResult:
     )
 
     if ctx.ephemeral:
-        delete_stored_llm_session(sid, aid, ctx.project_id or None)
+        delete_stored_session(sid, aid, ctx.project_id or None)
 
     set_active_llm_session(None)
     set_active_project_episodic(False)

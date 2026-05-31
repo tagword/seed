@@ -67,10 +67,10 @@ def _write_artifact(*, kind: str, name_hint: str, text: str) -> Optional[str]:
     if len(text or "") < _artifact_min_chars():
         return None
     try:
-        from seed.core.llm_sess import llm_sessions_dir
+        from seed.core.llm_sess import agent_sessions_dir
 
         agent_id, session_id = _active_agent_and_session()
-        base = os.path.join(str(llm_sessions_dir(agent_id)), "_artifacts", session_id)
+        base = os.path.join(str(agent_sessions_dir(agent_id)), "_artifacts", session_id)
         os.makedirs(base, exist_ok=True)
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         safe_kind = re.sub(r"[^\w\-]", "_", (kind or "tool"))[:48]

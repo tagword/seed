@@ -48,3 +48,17 @@ def test_mcp_stdio_list_and_call(tmp_path, monkeypatch) -> None:
         assert "echo:hello-mcp" in out
     finally:
         sess.close()
+
+
+def test_probe_mcp_server_config(tmp_path, monkeypatch) -> None:
+    from seed.integrations.mcp_client import probe_mcp_server_config
+
+    monkeypatch.setenv("SEED_PROJECT_ROOT", str(tmp_path))
+    cfg = MCPServerConfig(
+        server_id="fake",
+        command=sys.executable,
+        args=[str(_FAKE)],
+    )
+    out = probe_mcp_server_config(cfg)
+    assert out.get("ok") is True
+    assert "echo" in (out.get("tools") or [])

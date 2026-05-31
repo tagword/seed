@@ -110,11 +110,12 @@ class TurnLoopEngine:
             import os
             from pathlib import Path
 
-            from seed.core.llm_sess import llm_sessions_dir
+            from seed.core.llm_sess import agent_sessions_dir
             from seed.core.sess_store import SessionManager
+            import seed.core.env_access as _ea
 
             raw = _ea.pick_nonempty(*_ea.SESSION_DIR)
-            base = str(Path(raw).expanduser().resolve()) if raw else str(llm_sessions_dir())
+            base = str(Path(raw).expanduser().resolve()) if raw else str(agent_sessions_dir())
             manager = SessionManager(base)
             manager.update_session(self.session)
             logger.debug(f"Session auto-saved: {self.session.id}")

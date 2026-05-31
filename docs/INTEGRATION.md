@@ -37,7 +37,7 @@ flowchart TB
 | 装什么包？ | `pip install seed`；需要内置工具时再装 `seed-tools`（依赖 `seed`）。 |
 | 项目根在哪配？ | 设置 **`SEED_PROJECT_ROOT`**，或确保默认探测逻辑符合你的部署布局。 |
 | LLM 网关怎么配？ | 至少 **`SEED_LLM_BASEURL`**、**`SEED_LLM_MODEL`**；密钥 **`SEED_LLM_API_KEY`**。详见 [ENV_REFERENCE.md](ENV_REFERENCE.md)。 |
-| 会话目录？ | **`SEED_LLM_SESSIONS_DIR`** / **`SEED_SESSION_DIR`** 等与路径相关的变量见 ENV_REFERENCE。 |
+| 会话目录？ | **`SEED_AGENT_SESSIONS_DIR`**（或 **`SEED_LLM_SESSIONS_DIR`**）/ **`SEED_SESSION_DIR`** 等见 ENV_REFERENCE；布局见 [SESSIONS_LAYOUT_MIGRATION.md](SESSIONS_LAYOUT_MIGRATION.md)。 |
 
 ## 延伸阅读
 

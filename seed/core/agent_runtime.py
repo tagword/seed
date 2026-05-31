@@ -997,6 +997,17 @@ def maybe_compact_context_messages(
 
     summarizer = _summarizer_llm(llm)
     try:
+        from seed.core.projection_audit import persist_llm_projection_audit
+
+        persist_llm_projection_audit(
+            sum_messages,
+            kind="compact_summarizer",
+            round_index=0,
+            extra={"trigger": "maybe_compact_context_messages"},
+        )
+    except Exception:
+        logger.debug("compact summarizer projection audit failed", exc_info=True)
+    try:
         summary, _meta = summarizer.generate(sum_messages, tools=None)
     except LLMError as e:
         logger.warning("Context compact skipped (summarizer LLM error): %s", e)
@@ -1099,6 +1110,9 @@ def _stream_llm_round(
     tool_schema: Optional[List[Dict[str, Any]]],
     on_text_delta: Optional[Callable[[str], None]],
     on_reasoning_delta: Optional[Callable[[str], None]],
+    *,
+    enable_thinking: Optional[bool] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any]]:
     """Run one LLM round with per-token streaming (called in a thread).
 
@@ -1109,7 +1123,12 @@ def _stream_llm_round(
     tool_calls: List[Dict[str, Any]] = []
     metadata: Dict[str, Any] = {}
 
-    for event in llm.generate_stream(messages, tools=tool_schema):
+    for event in llm.generate_stream(
+        messages,
+        tools=tool_schema,
+        enable_thinking=enable_thinking,
+        reasoning_effort=reasoning_effort,
+    ):
         if is_chat_cancelled():
             break
         et = event.get("type")
@@ -1166,6 +1185,8 @@ async def run_llm_tool_loop(
     on_text_delta: Optional[Callable[[str], None]] = None,
     on_reasoning_delta: Optional[Callable[[str], None]] = None,
     on_check_pending_messages: Optional[Callable[[], List[Dict[str, Any]]]] = None,
+    enable_thinking: Optional[bool] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> Tuple[str, Dict[str, Any], List[str], List[Dict[str, str]], Dict[str, Any]]:
     tools_used: List[str] = []
     tool_trace: List[Dict[str, str]] = []
@@ -1208,6 +1229,18 @@ async def run_llm_tool_loop(
                             break
                     return reply, last_meta, tools_used, tool_trace, loop_meta
 
+            try:
+                from seed.core.projection_audit import persist_llm_projection_audit
+
+                persist_llm_projection_audit(
+                    messages,
+                    kind="chat",
+                    round_index=round_i + 1,
+                    extra={"max_tool_rounds": int(max_tool_rounds)},
+                )
+            except Exception:
+                logger.debug("chat projection audit failed", exc_info=True)
+
             # --- Streaming LLM round (per-token) ---
             content, tool_calls, meta = await asyncio.to_thread(
                 _stream_llm_round,
@@ -1216,6 +1249,8 @@ async def run_llm_tool_loop(
                 tool_schema,
                 on_text_delta,
                 on_reasoning_delta,
+                enable_thinking=enable_thinking,
+                reasoning_effort=reasoning_effort,
             )
             last_meta = meta or {}
 

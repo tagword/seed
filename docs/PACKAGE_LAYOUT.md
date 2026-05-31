@@ -31,7 +31,7 @@ seed.core       → 标准库 + httpx + requests + ddgs（以 seed/pyproject.tom
 | 子包 | 路径 | 职责 |
 |------|------|------|
 | **core** | `seed/seed/core/` | 主循环、LLM、会话与记忆、`config_plane`、`paths`、`proj_reg`、`proj_todos`、`execution`、`agent_runtime`、`sess_store`、`chat_events`、`tool_runtime` 等 |
-| **integrations** | `seed/seed/integrations/` | 浏览器、**safety**（清洗与 bash 策略）、webhook、transcript、`message_api`、`session_title`、**cron**（`cron_sched`）、**`env_config`** |
+| **integrations** | `seed/seed/integrations/` | 浏览器、**safety**（清洗与 bash 策略）、webhook、`message_api`、`session_title`、**cron**（`cron_sched`）、**`env_config`** |
 
 ## `seed-tools` 包
 

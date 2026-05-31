@@ -21,6 +21,7 @@ class LLMAPIExecutor:
         topK: int = 40,
         api_key: Optional[str] = None,
         auth_scheme: Optional[str] = None,
+        provider: Optional[str] = None,
     ):
         """
         Initialize LLM API executor.
@@ -48,6 +49,12 @@ class LLMAPIExecutor:
         )
         self.maxOutputTokens = int(
             _ea.pick_default(str(maxOutputTokens), *_ea.LLM_MAX_TOKENS)
+        )
+        from seed.core.model_providers import resolve_chat_protocol
+
+        self.provider = (provider or "").strip()
+        self.chat_protocol = resolve_chat_protocol(
+            provider=self.provider, base_url=self.baseURL
         )
         self.headers = {
             "Content-Type": "application/json"
@@ -92,6 +99,7 @@ def generate(
     temperature_reset: bool = False,
     max_tokens: Optional[int] = None,
     enable_thinking: Optional[bool] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> Tuple[str, Dict[str, Any]]:
     """
     Generate response from LLM.
@@ -109,7 +117,9 @@ def generate(
     """
     self._ensure_base_url()
     eff_max = self.maxOutputTokens if max_tokens is None else int(max_tokens)
-    api_messages = _openai_chat_messages(messages, base_url=self.baseURL)
+    api_messages = _openai_chat_messages(
+        messages, base_url=self.baseURL, chat_protocol=self.chat_protocol
+    )
     params: Dict[str, Any] = {
         "model": self.model,
         "messages": copy.deepcopy(api_messages),
@@ -124,7 +134,7 @@ def generate(
         params["tools"] = tools
         params["tool_choice"] = "auto"
 
-    # --- Reasoning separation (sglang / DeepSeek-style contract) -----
+    # --- Reasoning separation (provider-specific) -----
     extra_body: Dict[str, Any] = {}
     # Resolve enable_thinking from caller arg or env.
     if enable_thinking is None:
@@ -133,20 +143,16 @@ def generate(
     else:
         resolved_thinking = bool(enable_thinking)
 
-    if _is_deepseek_url(self.baseURL):
-        # DeepSeek official API: use native thinking.type, NOT sglang-specific params.
-        extra_body["thinking"] = {"type": "enabled" if resolved_thinking else "disabled"}
-        if resolved_thinking:
-            effort = _ea.pick_default("", *_ea.LLM_REASONING_EFFORT).strip().lower()
-            if effort in ("low", "medium", "high", "max"):
-                params["reasoning_effort"] = effort
-    else:
-        # SGLang / Qwen3: separate_reasoning + chat_template_kwargs.enable_thinking
-        if _ea.pick_default("1", *_ea.LLM_SEPARATE_REASONING) != "0":
-            extra_body["separate_reasoning"] = True
-        if _ea.pick_default("1", *_ea.LLM_CHAT_TEMPLATE_KWARGS) != "0":
-            extra_body.setdefault("chat_template_kwargs", {})
-            extra_body["chat_template_kwargs"]["enable_thinking"] = resolved_thinking
+    from seed.core.model_providers import apply_chat_thinking_extra_body
+
+    apply_chat_thinking_extra_body(
+        chat_protocol=self.chat_protocol,
+        base_url=self.baseURL,
+        params=params,
+        extra_body=extra_body,
+        resolved_thinking=resolved_thinking,
+        reasoning_effort=reasoning_effort,
+    )
     user_extra = _ea.pick_nonempty(*_ea.LLM_EXTRA_BODY)
     if user_extra:
         try:
@@ -163,7 +169,7 @@ def generate(
     for k, v in extra_body.items():
         params.setdefault(k, v)
 
-    max_body = max_llm_request_body_bytes(self.baseURL)
+    max_body = max_llm_request_body_bytes(self.baseURL, chat_protocol=self.chat_protocol)
     if max_body > 0:
         maybe_shrink_llm_request_params(params, max_bytes=max_body, base_url=self.baseURL)
 
@@ -294,6 +300,7 @@ def generate_stream(
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
     enable_thinking: Optional[bool] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> Generator[Dict[str, Any], None, None]:
     """Stream response from LLM, yielding SSE chunks as they arrive.
 
@@ -305,7 +312,9 @@ def generate_stream(
     """
     self._ensure_base_url()
     eff_max = self.maxOutputTokens if max_tokens is None else int(max_tokens)
-    api_messages = _openai_chat_messages(messages, base_url=self.baseURL)
+    api_messages = _openai_chat_messages(
+        messages, base_url=self.baseURL, chat_protocol=self.chat_protocol
+    )
     params: Dict[str, Any] = {
         "model": self.model,
         "messages": copy.deepcopy(api_messages),
@@ -329,18 +338,16 @@ def generate_stream(
     else:
         resolved_thinking = bool(enable_thinking)
 
-    if _is_deepseek_url(self.baseURL):
-        extra_body["thinking"] = {"type": "enabled" if resolved_thinking else "disabled"}
-        if resolved_thinking:
-            effort = _ea.pick_default("", *_ea.LLM_REASONING_EFFORT).strip().lower()
-            if effort in ("low", "medium", "high", "max"):
-                params["reasoning_effort"] = effort
-    else:
-        if _ea.pick_default("1", *_ea.LLM_SEPARATE_REASONING) != "0":
-            extra_body["separate_reasoning"] = True
-        if _ea.pick_default("1", *_ea.LLM_CHAT_TEMPLATE_KWARGS) != "0":
-            extra_body.setdefault("chat_template_kwargs", {})
-            extra_body["chat_template_kwargs"]["enable_thinking"] = resolved_thinking
+    from seed.core.model_providers import apply_chat_thinking_extra_body
+
+    apply_chat_thinking_extra_body(
+        chat_protocol=self.chat_protocol,
+        base_url=self.baseURL,
+        params=params,
+        extra_body=extra_body,
+        resolved_thinking=resolved_thinking,
+        reasoning_effort=reasoning_effort,
+    )
     user_extra = _ea.pick_nonempty(*_ea.LLM_EXTRA_BODY)
     if user_extra:
         try:
@@ -355,7 +362,7 @@ def generate_stream(
     for k, v in extra_body.items():
         params.setdefault(k, v)
 
-    max_body = max_llm_request_body_bytes(self.baseURL)
+    max_body = max_llm_request_body_bytes(self.baseURL, chat_protocol=self.chat_protocol)
     if max_body > 0:
         maybe_shrink_llm_request_params(params, max_bytes=max_body, base_url=self.baseURL)
 
@@ -523,20 +530,18 @@ logger = logging.getLogger(__name__)
 
 def _is_deepseek_url(base_url: Optional[str] = None) -> bool:
     """
-    Detect DeepSeek official API.
-
-    Prefer ``base_url`` from :class:`LLMAPIExecutor` (Web UI presets may point at
-    DeepSeek while env ``SEED_LLM_BASEURL`` still holds a default / other host).
-    Without a URL, fall back to env base URL.
+    Legacy URL heuristic; prefer explicit ``provider`` / ``chat_protocol`` on executor.
     """
-    raw = (base_url or "").strip() or _ea.pick_nonempty(*_ea.LLM_BASEURL)
-    return "api.deepseek.com" in raw.lower()
+    from seed.core.model_providers import uses_deepseek_chat_protocol
+
+    return uses_deepseek_chat_protocol(provider="", base_url=base_url or "")
 
 
 def _openai_chat_messages(
     messages: List[Dict[str, Any]],
     *,
     base_url: Optional[str] = None,
+    chat_protocol: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Strip non-API keys (e.g. ``ts``) before POSTing to OpenAI-compatible endpoints.
@@ -552,14 +557,15 @@ def _openai_chat_messages(
         gated behind an env flag, with a safe auto-enable for DeepSeek's
         official endpoint.
         """
-        env = _ea.pick_default("", *_ea.LLM_SEND_REASONING_CONTENT).strip().lower()
-        if env in ("1", "true", "yes", "on"):
-            return True
-        if env in ("0", "false", "no", "off"):
-            return False
-        return _is_deepseek_url(base_url)
+        from seed.core.model_providers import resolve_chat_protocol, should_send_reasoning_content
+
+        proto = chat_protocol or resolve_chat_protocol(provider="", base_url=base_url or "")
+        return should_send_reasoning_content(chat_protocol=proto, base_url=base_url or "")
 
     include_rc = _should_send_reasoning_content()
+    _deepseek_proto = (chat_protocol or "") == "deepseek" or (
+        not chat_protocol and _is_deepseek_url(base_url)
+    )
     out: List[Dict[str, Any]] = []
     for m in messages:
         if not isinstance(m, dict):
@@ -591,7 +597,7 @@ def _openai_chat_messages(
         # Other backends: only send when we have tool_calls or a stored key, so
         # strict OpenAI-compatible proxies are not spammed with unknown fields.
         if include_rc and role == "assistant":
-            if _is_deepseek_url(base_url):
+            if _deepseek_proto:
                 rc = m.get("reasoning_content")
                 row["reasoning_content"] = "" if rc is None else _msg_text_to_str(rc)
             elif m.get("tool_calls") or ("reasoning_content" in m):
@@ -714,7 +720,7 @@ from typing import Optional, Tuple
 
 
 _default_executor: Optional[LLMAPIExecutor] = None
-_executor_env_key: Optional[Tuple[str, str, str, str, str]] = None
+_executor_env_key: Optional[Tuple[str, str, str, str, str, str]] = None
 
 
 def get_llm_executor(
@@ -724,6 +730,7 @@ def get_llm_executor(
     api_key: Optional[str] = None,
     auth_scheme: Optional[str] = None,
     max_tokens: Optional[int] = None,
+    provider: Optional[str] = None,
 ) -> LLMAPIExecutor:
     """
     Get or create default LLM executor.
@@ -766,7 +773,15 @@ def get_llm_executor(
     if auth_scheme is not None and auth_scheme.strip():
         resolved_scheme = auth_scheme.strip()
 
-    key = (resolved_url, resolved_model, max_tok, resolved_api, resolved_scheme)
+    resolved_provider = (provider or "").strip()
+    key = (
+        resolved_url,
+        resolved_model,
+        max_tok,
+        resolved_api,
+        resolved_scheme,
+        resolved_provider,
+    )
 
     if _default_executor is None or _executor_env_key != key:
         _default_executor = LLMAPIExecutor(
@@ -775,6 +790,7 @@ def get_llm_executor(
             api_key=resolved_api,
             auth_scheme=resolved_scheme,
             maxOutputTokens=int(max_tok),
+            provider=resolved_provider or None,
         )
         _executor_env_key = key
 
@@ -804,17 +820,22 @@ def request_json_size(params: Dict[str, Any]) -> int:
     return len(json.dumps(params, ensure_ascii=False).encode("utf-8"))
 
 
-def max_llm_request_body_bytes(base_url: Optional[str]) -> int:
+def max_llm_request_body_bytes(
+    base_url: Optional[str],
+    *,
+    chat_protocol: Optional[str] = None,
+) -> int:
     """0 = disabled. Official DeepSeek API often sits behind a ~1MiB reverse-proxy limit."""
+    from seed.core.model_providers import default_max_request_body_bytes, resolve_chat_protocol
+
     raw = _ea.pick_nonempty(*_ea.LLM_MAX_REQUEST_BODY_BYTES)
     if raw:
         try:
             return max(0, int(raw))
         except ValueError:
             logger.warning("Invalid SEED_LLM_MAX_REQUEST_BODY_BYTES=%r", raw)
-    if _is_deepseek_url(base_url or ""):
-        return 786432  # 768 KiB — leave headroom below common 1MiB nginx limits
-    return 0
+    proto = chat_protocol or resolve_chat_protocol(provider="", base_url=base_url or "")
+    return default_max_request_body_bytes(proto, base_url or "")
 
 
 def maybe_shrink_llm_request_params(
@@ -868,7 +889,10 @@ def maybe_shrink_llm_request_params(
                     )
 
     def trunc_rc(cap: int) -> None:
-        if not _is_deepseek_url(base_url or ""):
+        from seed.core.model_providers import resolve_chat_protocol
+
+        proto = resolve_chat_protocol(provider="", base_url=base_url or "")
+        if proto != "deepseek":
             return
         for i, m in enumerate(msgs):
             if not isinstance(m, dict) or m.get("role") != "assistant":

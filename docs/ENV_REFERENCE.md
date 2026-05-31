@@ -26,8 +26,8 @@
 | `SEED_LLM_MODEL` | `CODEAGENT_LLM_MODEL` | 默认模型 id |
 | `SEED_LLM_MAX_TOKENS` | `CODEAGENT_LLM_MAX_TOKENS` | max_tokens 等 |
 | `SEED_LLM_NO_TOPK` | `CODEAGENT_LLM_NO_TOPK` | 禁用 top-k 类参数 |
-| `SEED_LLM_ENABLE_THINKING` | `CODEAGENT_LLM_ENABLE_THINKING` | thinking 开关 |
-| `SEED_LLM_REASONING_EFFORT` | `CODEAGENT_LLM_REASONING_EFFORT` | reasoning effort |
+| `SEED_LLM_ENABLE_THINKING` | `CODEAGENT_LLM_ENABLE_THINKING` | thinking 开关；DeepSeek V4 写入 `extra_body.thinking.type` |
+| `SEED_LLM_REASONING_EFFORT` | `CODEAGENT_LLM_REASONING_EFFORT` | DeepSeek 思考强度：`high`（默认）/ `max`；`low`/`medium`→`high`，`xhigh`→`max` |
 | `SEED_LLM_SEPARATE_REASONING` | `CODEAGENT_LLM_SEPARATE_REASONING` | separate_reasoning |
 | `SEED_LLM_CHAT_TEMPLATE_KWARGS` | `CODEAGENT_LLM_CHAT_TEMPLATE_KWARGS` | chat_template_kwargs |
 | `SEED_LLM_EXTRA_BODY` | `CODEAGENT_LLM_EXTRA_BODY` | 额外 JSON body |
@@ -68,11 +68,13 @@
 | `SEED_SAFETY_BASH_BLOCKED` | `CODEAGENT_SAFETY_BASH_BLOCKED` | 额外 bash 拦截模式 |
 | `SEED_SAFETY_BASH_ALLOWED_DIRS` | `CODEAGENT_SAFETY_BASH_ALLOWED_DIRS` | bash 允许 cwd |
 | `SEED_SAFETY_BASH_TIMEOUT_MAX` | `CODEAGENT_SAFETY_BASH_TIMEOUT_MAX` | bash 超时硬上限 |
-| `SEED_SAFETY_AUDIT_LOG` | `CODEAGENT_SAFETY_AUDIT_LOG` | 审计日志 |
+| `SEED_SAFETY_AUDIT_LOG` | `CODEAGENT_SAFETY_AUDIT_LOG` | 安全事件审计日志 |
+| `SEED_LLM_PROJECTION_AUDIT` | `CODEAGENT_LLM_PROJECTION_AUDIT` | 每轮 LLM 请求全文快照（`sessions/_audit/<session>/`） |
+| `SEED_LLM_PROJECTION_AUDIT_DIR` | `CODEAGENT_LLM_PROJECTION_AUDIT_DIR` | 可选覆盖审计目录根 |
 | `SEED_SAFETY_REDACT_SECRETS` | `CODEAGENT_SAFETY_REDACT_SECRETS` | 密钥脱敏 |
 | `SEED_SAFETY_REDACT_PII` | `CODEAGENT_SAFETY_REDACT_PII` | PII 脱敏 |
 
-## Cron、记忆与 transcript
+## Cron 与记忆
 
 | Seed canonical | 别名 | 含义（摘要） |
 |----------------|------|--------------|
@@ -82,11 +84,11 @@
 | `SEED_MEMORY_LOG` | `CODEAGENT_MEMORY_LOG` | episodic 写入开关 |
 | `SEED_CRON_EXPERIENCE_SKIP_DUPLICATE` | `CODEAGENT_CRON_EXPERIENCE_SKIP_DUPLICATE` | cron 经验去重 |
 | `SEED_CRON_EXPERIENCE_TTL_SECONDS` | `CODEAGENT_CRON_EXPERIENCE_TTL_SECONDS` | cron 经验 TTL |
-| `SEED_MEMORY_INJECT` | `CODEAGENT_MEMORY_INJECT` | episodic 注入 system |
+| `SEED_MEMORY_INJECT` | `CODEAGENT_MEMORY_INJECT` | episodic 注入 system（进模型前贴到投影 system，非每轮扫盘） |
 | `SEED_MEMORY_INJECT_MAX_CHARS` | `CODEAGENT_MEMORY_INJECT_MAX_CHARS` | 注入块最大字符 |
 | `SEED_MEMORY_INJECT_SESSION_ONLY` | `CODEAGENT_MEMORY_INJECT_SESSION_ONLY` | 仅本会话经验 |
-| `SEED_TRANSCRIPT` | `CODEAGENT_TRANSCRIPT` | JSONL transcript |
 
+Episodic 快照写入 Session `metadata`（`episodic_block` 等）：**新会话首轮**扫一次（agent 或项目 `memory/experiences`）；之后在 **context compact 成功** 时刷新；其余轮次只贴快照。绑定项目切换且已有快照时会再刷新。epoch 内新写的 experience 要到下次 compact 才进入模型。
 ## Webhook
 
 | Seed canonical | 别名 | 含义（摘要） |

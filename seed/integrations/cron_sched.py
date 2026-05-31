@@ -230,12 +230,9 @@ async def _run_cron_job_async(job: Dict[str, Any]) -> None:
     )
     from seed.core.agent_context import clear_active_project_episodic, set_active_llm_session
     from seed.core.llm_exec import LLMError
-    from seed.core.mem_bridge import apply_episodic_to_messages
+    from seed.core.mem_bridge import finalize_episodic_for_llm
     from seed.core.mem_sys import MemorySystem
-    from seed.core.config_plane import project_root
     from seed.core.llm_presets import llm_executor_from_resolved, resolve_preset
-    from seed.integrations.transcript_store import append_transcript_entries
-
     if mkey in SESSIONS:
         chat_sess = SESSIONS[mkey]
     else:
@@ -279,12 +276,6 @@ async def _run_cron_job_async(job: Dict[str, Any]) -> None:
             "ts": datetime.now(timezone.utc).isoformat(),
         }
     )
-    try:
-        await asyncio.to_thread(
-            append_transcript_entries, sid, [chat_sess.messages[-1]], agent_id=agent_id
-        )
-    except Exception:
-        pass
     max_hist = int(_ea.pick_default("12", *_ea.CHAT_USER_ROUNDS))
 
     # Resolve LLM config from presets / env
@@ -302,20 +293,15 @@ async def _run_cron_job_async(job: Dict[str, Any]) -> None:
         compact_result = maybe_compact_context_messages(api_msgs, llm)
         persist_compact_summary(chat_sess.messages, compact_result)
         strip_ephemeral_message_fields(api_msgs)
-        try:
-            from seed.core.paths import agent_memory_dir
-
-            await asyncio.to_thread(
-                apply_episodic_to_messages,
-                api_msgs,
-                agent_memory_dir(agent_id),
-                sid,
-                False,
-            )
-        except Exception:
-            await asyncio.to_thread(
-                apply_episodic_to_messages, api_msgs, project_root(), sid, False
-            )
+        await asyncio.to_thread(
+            finalize_episodic_for_llm,
+            api_msgs,
+            chat_sess.metadata,
+            agent_id=agent_id,
+            session_id=sid,
+            project_id=project_id or None,
+            compact_happened=compact_result is not None,
+        )
         reg, exe = _tools_for_agent(agent_id)
         n_before = len(api_msgs)
         # ── single run (no continuation loop — cron interval handles retriggering) ──
@@ -325,13 +311,6 @@ async def _run_cron_job_async(job: Dict[str, Any]) -> None:
             registry=reg,
         )
         tail = merge_llm_tail_into_full(chat_sess.messages, api_msgs, n_before)
-        try:
-            if tail:
-                await asyncio.to_thread(
-                    append_transcript_entries, sid, tail, agent_id=agent_id
-                )
-        except Exception:
-            pass
         try:
             await asyncio.to_thread(persist_chat_session, chat_sess, agent_id)
         except Exception:
@@ -670,9 +649,8 @@ def run_cron_job_sync(job: Dict[str, Any]) -> None:
     )
     from seed.core.agent_context import clear_active_project_episodic, set_active_llm_session
     from seed.core.llm_exec import LLMError
-    from seed.core.mem_bridge import apply_episodic_to_messages
+    from seed.core.mem_bridge import finalize_episodic_for_llm
     from seed.core.mem_sys import MemorySystem
-    from seed.core.config_plane import project_root
     from seed.core.llm_presets import llm_executor_from_resolved, resolve_preset
 
     if mkey in SESSIONS:
@@ -715,12 +693,6 @@ def run_cron_job_sync(job: Dict[str, Any]) -> None:
             "ts": datetime.now(timezone.utc).isoformat(),
         }
     )
-    try:
-        from seed.integrations.transcript_store import append_transcript_entries
-
-        append_transcript_entries(sid, [chat_sess.messages[-1]], agent_id=agent_id)
-    except Exception:
-        pass
     max_hist = int(_ea.pick_default("12", *_ea.CHAT_USER_ROUNDS))
 
     # Resolve LLM config from presets / env (see resolve_preset)
@@ -737,19 +709,14 @@ def run_cron_job_sync(job: Dict[str, Any]) -> None:
         compact_result = maybe_compact_context_messages(api_msgs, llm)
         persist_compact_summary(chat_sess.messages, compact_result)
         strip_ephemeral_message_fields(api_msgs)
-        try:
-            from seed.core.paths import agent_memory_dir
-
-            apply_episodic_to_messages(
-                api_msgs,
-                agent_memory_dir(agent_id),
-                sid,
-                project_scope=False,
-            )
-        except Exception:
-            apply_episodic_to_messages(
-                api_msgs, project_root(), sid, project_scope=False
-            )
+        finalize_episodic_for_llm(
+            api_msgs,
+            chat_sess.metadata,
+            agent_id=agent_id,
+            session_id=sid,
+            project_id=project_id or None,
+            compact_happened=compact_result is not None,
+        )
         reg, exe = _tools_for_agent(agent_id)
         n_before = len(api_msgs)
         # ── single run (no continuation loop — cron interval handles retriggering) ──
@@ -761,13 +728,6 @@ def run_cron_job_sync(job: Dict[str, Any]) -> None:
             )
         )
         tail = merge_llm_tail_into_full(chat_sess.messages, api_msgs, n_before)
-        try:
-            from seed.integrations.transcript_store import append_transcript_entries
-
-            if tail:
-                append_transcript_entries(sid, tail, agent_id=agent_id)
-        except Exception:
-            pass
         try:
             persist_chat_session(chat_sess, agent_id)
         except Exception:
