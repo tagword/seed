@@ -438,6 +438,86 @@ _COMPACT_BLOCK = re.compile(
 )
 
 
+def _clean_invalid_tool_call_arguments(messages: List[Dict[str, Any]]) -> None:
+    """In-place: strip tool_calls whose ``function.arguments`` is not valid JSON.
+
+    Historical self-heal for sessions that were saved *before* llm_exec started
+    validating LLM tool_call arguments.  When a streaming response was truncated
+    (network blip, token limit, mid-arg server drop), the accumulated
+    ``function.arguments`` was often ``""`` or partial JSON.  Persisting that
+    poisons the conversation: the next LLM call rejects the whole request with
+    ``HTTP 400 invalid function arguments json string``.
+
+    For each assistant message we drop the malformed entries.  If the assistant
+    message has no remaining tool_calls after the sweep but does have text, we
+    keep the message as plain text.  If the message was *only* a malformed
+    tool_call (no content / whitespace-only content), we remove the message
+    entirely so we don't leave a content-less assistant turn.
+
+    This is best-effort: it only inspects a message's *own* tool_calls.  Tool
+    responses (role=tool) for the dropped ids become orphaned; the
+    ``_clean_orphaned_tool_calls`` pass that follows will deal with them.
+    """
+    if not messages:
+        return
+    for m in messages:
+        if not isinstance(m, dict) or m.get("role") != "assistant":
+            continue
+        raw_tc = m.get("tool_calls")
+        if not raw_tc or not isinstance(raw_tc, list):
+            continue
+        kept: List[Dict[str, Any]] = []
+        dropped_ids: List[str] = []
+        for tc in raw_tc:
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function") or {}
+            if not isinstance(fn, dict):
+                continue
+            args = fn.get("arguments")
+            if not isinstance(args, str) or not args.strip():
+                dropped_ids.append(str(tc.get("id") or "?"))
+                continue
+            try:
+                json.loads(args)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                dropped_ids.append(str(tc.get("id") or "?"))
+                continue
+            kept.append(tc)
+        if dropped_ids:
+            logger.warning(
+                "Stripped %d tool_call(s) with invalid JSON arguments "
+                "(likely from prior streaming truncation): %s",
+                len(dropped_ids), dropped_ids[:5],
+            )
+            if kept:
+                m["tool_calls"] = kept
+            else:
+                m.pop("tool_calls", None)
+                # If the message was only a broken tool_call with no text content,
+                # drop the empty assistant turn entirely.
+                if not str(m.get("content") or "").strip():
+                    # Mark for removal: tag with sentinel, sweeper removes.
+                    m["_invalid_tc_drop_turn"] = True
+
+
+def _sweep_empty_invalid_tc_turns(messages: List[Dict[str, Any]]) -> None:
+    """In-place: remove assistant turns tagged by ``_clean_invalid_tool_call_arguments``
+    that have no text content left (only had malformed tool_calls)."""
+    if not messages:
+        return
+    i = 0
+    while i < len(messages):
+        m = messages[i]
+        if (
+            isinstance(m, dict)
+            and m.get("_invalid_tc_drop_turn")
+        ):
+            messages.pop(i)
+            continue
+        i += 1
+
+
 def _clean_orphaned_tool_calls(messages: List[Dict[str, Any]]) -> None:
     """In-place: remove assistant tool_calls that lack matching tool responses.
 
@@ -636,6 +716,11 @@ def build_api_projection_messages(
         api[0]["content"] = str(api[0].get("content") or "").rstrip() + skills_suffix
     if max_user_rounds > 0:
         api[:] = trim_messages_by_user_rounds(api, max_user_rounds)
+    # Drop tool_calls with invalid JSON arguments first (historical self-heal
+    # for sessions saved before llm_exec started validating them), then remove
+    # assistant turns that became empty as a result, then clean orphans.
+    _clean_invalid_tool_call_arguments(api)
+    _sweep_empty_invalid_tc_turns(api)
     _clean_orphaned_tool_calls(api)
     return api
 

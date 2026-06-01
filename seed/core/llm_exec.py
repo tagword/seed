@@ -671,7 +671,21 @@ msg_text_to_str = _msg_text_to_str
 
 
 def _extract_tool_calls(msg: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Parse tool_calls; tolerate missing ids or oddly-shaped function payloads."""
+    """Parse tool_calls; tolerate missing ids or oddly-shaped function payloads.
+
+    **Argument validation**: ``function.arguments`` must be a non-empty string of
+    valid JSON.  This is the exact contract the LLM API (OpenAI / DeepSeek /
+    MiniMax / Minimax / SGLang ...) validates on the *next* turn when it sees the
+    historical ``tool_calls`` echoed back.  If a streaming response was truncated
+    (network blip, token limit, mid-arg server drop) the accumulated
+    ``function.arguments`` can be ``""`` or partial JSON.  Persisting that into
+    message history poisons the conversation: the next LLM call returns HTTP 400
+    ``invalid function arguments json string`` and the chat dies.
+
+    We drop such malformed tool_calls here so the loop can keep going (e.g. the
+    model just emits plain text on the next turn) instead of carrying a time bomb
+    forward.
+    """
     raw = msg.get("tool_calls")
     if not raw:
         return []
@@ -688,15 +702,43 @@ def _extract_tool_calls(msg: Dict[str, Any]) -> List[Dict[str, Any]]:
                 fn = {"name": "", "arguments": "{}"}
         if not isinstance(fn, dict):
             fn = {"name": "", "arguments": "{}"}
+        # --- Validate arguments is non-empty valid JSON ---
+        raw_args = fn.get("arguments")
+        if isinstance(raw_args, str):
+            if not raw_args.strip():
+                logger.warning(
+                    "Dropping tool_call id=%r name=%r: arguments is empty "
+                    "(likely streaming truncation).",
+                    tid, fn.get("name") or "",
+                )
+                continue
+            try:
+                json.loads(raw_args)
+            except (json.JSONDecodeError, TypeError, ValueError) as e:
+                logger.warning(
+                    "Dropping tool_call id=%r name=%r: arguments is not valid JSON (%s). "
+                    "Preview: %s",
+                    tid, fn.get("name") or "", e, raw_args[:200],
+                )
+                continue
+        else:
+            # Provider gave us a dict / other non-string; normalize to a
+            # canonical JSON string.  json.dumps("{}") is still valid.
+            try:
+                raw_args = json.dumps(raw_args if raw_args is not None else {}, ensure_ascii=False)
+            except (TypeError, ValueError) as e:
+                logger.warning(
+                    "Dropping tool_call id=%r name=%r: arguments is not JSON-serializable (%s).",
+                    tid, fn.get("name") or "", e,
+                )
+                continue
         out.append(
             {
                 "id": tid,
                 "type": tc.get("type") or "function",
                 "function": {
                     "name": fn.get("name") or "",
-                    "arguments": fn.get("arguments")
-                    if isinstance(fn.get("arguments"), str)
-                    else json.dumps(fn.get("arguments") or {}),
+                    "arguments": raw_args,
                 },
             }
         )
