@@ -73,6 +73,11 @@ class LLMAPIExecutor:
 
     def _get_completion_url(self) -> str:
         """Get the completion endpoint URL"""
+        if self.chat_protocol == "minimax_anthropic":
+            base = (self.baseURL or "").rstrip("/")
+            if base.endswith("/v1"):
+                base = base[:-3]
+            return f"{base}/v1/messages"
         return f"{self.baseURL}/chat/completions"
     
 
@@ -82,6 +87,7 @@ import copy
 import json
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -201,7 +207,55 @@ def generate(
                     margin,
                 )
                 params["max_tokens"] = safe
-    
+
+    # MiniMax-only precheck: ask the API for an exact input-token estimate
+    # before paying for a request that may exceed the model's context window.
+    if self.chat_protocol == "minimax":
+        try:
+            est = estimate_minimax_tokens(
+                base_url=self.baseURL,
+                api_key=self.api_key,
+                auth_scheme=self.auth_scheme,
+                model=self.model,
+                messages=api_messages,
+                tools=tools,
+                reasoning_effort=reasoning_effort,
+            )
+            est_n = int(est.get("input_tokens") or 0)
+            ctx_override = int(_ea.pick_default("0", *_ea.LLM_CONTEXT_SIZE)) or None
+            err = precheck_minimax_context(
+                model=self.model,
+                estimated_input_tokens=est_n,
+                context_override=ctx_override,
+            )
+            if err:
+                raise LLMError(err)
+            if est_n >= MINIMAX_LONG_CONTEXT_THRESHOLD:
+                logger.info(
+                    "MiniMax '%s' long-context request: %d tokens (>= %d, "
+                    "long-context pricing applies).",
+                    self.model,
+                    est_n,
+                    MINIMAX_LONG_CONTEXT_THRESHOLD,
+                )
+        except LLMError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            # Precheck is best-effort; never block a real request on it.
+            logger.debug("MiniMax input_tokens precheck skipped: %s", e)
+
+    # Anthropic 主动缓存分支：把 OpenAI 风格 messages 转换为 Anthropic Messages
+    # 协议 payload，自动给 system / tools / 最后一条历史消息打 cache_control。
+    if self.chat_protocol == "minimax_anthropic":
+        params = _to_minimax_anthropic_request(
+            api_messages,
+            model=self.model,
+            max_tokens=int(params.get("max_tokens") or self.maxOutputTokens),
+            tools=tools,
+            enable_caching=True,
+            extra_body=extra_body,
+        )
+
     try:
         response = requests.post(
             self._get_completion_url(),
@@ -214,6 +268,11 @@ def generate(
             raise LLMError(
                 f"LLM HTTP {response.status_code} for {self._get_completion_url()}: {snippet}"
             )
+        if self.chat_protocol == "minimax_anthropic":
+            raw = response.json()
+            data = _parse_minimax_anthropic_response(raw)
+        else:
+            data = response.json()
         data = response.json()
 
         choices = data.get("choices") or []
@@ -231,7 +290,26 @@ def generate(
         reasoning_content = _msg_text_to_str(msg.get("reasoning_content") or "")
         reasoning_alt = _msg_text_to_str(msg.get("reasoning") or "")
         thinking = _msg_text_to_str(msg.get("thinking") or "")
-        reasoning_parts = [s for s in (reasoning_content, reasoning_alt, thinking) if s.strip()]
+        # MiniMax-M3 (with reasoning_split=True) returns reasoning in a
+        # separate `reasoning_details` list. 旧版 MiniMax-M2.x / 未启用
+        # reasoning_split 时，思考会内联在 `content` 中，被 <think>...</think>
+        # 标签包裹；下面一并剥离。
+        reasoning_details_text = _extract_reasoning_details_text(msg.get("reasoning_details"))
+        inline_think_text, stripped_content = _strip_think_tags(content)
+        if stripped_content != content:
+            content = stripped_content
+            if inline_think_text and not reasoning_details_text:
+                reasoning_details_text = inline_think_text
+        reasoning_parts = [
+            s
+            for s in (
+                reasoning_content,
+                reasoning_alt,
+                thinking,
+                reasoning_details_text,
+            )
+            if s.strip()
+        ]
         reasoning = "\n\n".join(reasoning_parts)
         # IMPORTANT: do NOT fall back to copying `reasoning` into `content`.
         # That fallback historically caused raw CoT to leak into visible
@@ -261,9 +339,12 @@ def generate(
         # `reasoning_content` metadata: prefer API `reasoning_content`, else any
         # CoT-bearing field so persist/echo never drops DeepSeek's chain.
         reasoning_echo = (reasoning_content.strip() or reasoning.strip())
+        raw_usage = data.get("usage", {})
+        if self.chat_protocol == "minimax" and isinstance(raw_usage, dict):
+            raw_usage = normalize_minimax_usage(raw_usage)
         metadata = {
             "model": self.model,
-            "usage": data.get("usage", {}),
+            "usage": raw_usage,
             "tool_calls": tool_calls,
             "reasoning": reasoning_for_meta,
             "reasoning_content": reasoning_echo,
@@ -461,9 +542,12 @@ def generate_stream(
                 full_content = ph
 
         reasoning_echo = reasoning.strip()
+        stream_usage = usage
+        if self.chat_protocol == "minimax" and isinstance(stream_usage, dict):
+            stream_usage = normalize_minimax_usage(stream_usage)
         metadata = {
             "model": self.model,
-            "usage": usage,
+            "usage": stream_usage,
             "tool_calls": built_tool_calls,
             "reasoning": reasoning,
             "reasoning_content": reasoning_echo,
@@ -562,6 +646,116 @@ def _openai_chat_messages(
         proto = chat_protocol or resolve_chat_protocol(provider="", base_url=base_url or "")
         return should_send_reasoning_content(chat_protocol=proto, base_url=base_url or "")
 
+    def _normalize_minimax_multimodal(content: Any) -> Any:
+        """Normalize MiniMax Responses-style multimodal blocks → OpenAI style.
+
+        MiniMax-M3 has two API surfaces:
+          - ``/v1/responses``  uses ``input_text`` / ``input_image`` / ``input_video``
+          - ``/v1/chat/completions`` uses ``text`` / ``image_url`` / ``video_url``
+
+        When a caller mixes schemas (e.g. agent code wrote Responses-style blocks
+        but the preset routes through chat/completions), we rewrite the
+        ``type`` so the OpenAI-compatible endpoint accepts the payload.
+        """
+        if not isinstance(content, list):
+            return content
+        out_parts: List[Dict[str, Any]] = []
+        changed = False
+        for p in content:
+            if not isinstance(p, dict):
+                out_parts.append(p)
+                continue
+            ptype = p.get("type")
+            if ptype == "input_text" and isinstance(p.get("text"), str):
+                out_parts.append({"type": "text", "text": p["text"]})
+                changed = True
+            elif ptype == "output_text" and isinstance(p.get("text"), str):
+                out_parts.append({"type": "text", "text": p["text"]})
+                changed = True
+            elif ptype == "input_image":
+                src = p.get("image_url") or p.get("image")
+                url = src.get("url") if isinstance(src, dict) else (src if isinstance(src, str) else None)
+                detail = src.get("detail") if isinstance(src, dict) else None
+                block: Dict[str, Any] = {"type": "image_url", "image_url": {"url": url or ""}}
+                if detail:
+                    block["image_url"]["detail"] = detail
+                out_parts.append(block)
+                changed = True
+            elif ptype == "input_video":
+                src = p.get("video_url") or p.get("video")
+                url = src.get("url") if isinstance(src, dict) else (src if isinstance(src, str) else None)
+                fps = src.get("fps") if isinstance(src, dict) else None
+                vblock: Dict[str, Any] = {"type": "video_url", "video_url": {"url": url or ""}}
+                if fps is not None:
+                    vblock["video_url"]["fps"] = fps
+                out_parts.append(vblock)
+                changed = True
+            else:
+                out_parts.append(p)
+        return out_parts if changed else content
+
+    def _normalize_minimax_multimodal(content: Any) -> Any:
+        """Normalize MiniMax Responses-style multimodal blocks → OpenAI style.
+
+        MiniMax-M3 has two API surfaces:
+          - ``/v1/responses``  uses ``input_text`` / ``input_image`` / ``input_video``
+          - ``/v1/chat/completions`` uses ``text`` / ``image_url`` / ``video_url``
+
+        When a caller mixes schemas (e.g. agent code wrote Responses-style blocks
+        but the preset routes through chat/completions), we rewrite the
+        ``type`` so the OpenAI-compatible endpoint accepts the payload.
+        """
+        if not isinstance(content, list):
+            return content
+        out_parts: List[Dict[str, Any]] = []
+        changed = False
+        for p in content:
+            if not isinstance(p, dict):
+                out_parts.append(p)
+                continue
+            ptype = p.get("type")
+            if ptype == "input_text" and isinstance(p.get("text"), str):
+                out_parts.append({"type": "text", "text": p["text"]})
+                changed = True
+            elif ptype == "output_text" and isinstance(p.get("text"), str):
+                out_parts.append({"type": "text", "text": p["text"]})
+                changed = True
+            elif ptype == "input_image":
+                src = p.get("image_url") or p.get("image")
+                url = src.get("url") if isinstance(src, dict) else (src if isinstance(src, str) else None)
+                detail = src.get("detail") if isinstance(src, dict) else None
+                block: Dict[str, Any] = {"type": "image_url", "image_url": {"url": url or ""}}
+                if detail:
+                    block["image_url"]["detail"] = detail
+                out_parts.append(block)
+                changed = True
+            elif ptype == "input_video":
+                src = p.get("video_url") or p.get("video")
+                url = src.get("url") if isinstance(src, dict) else (src if isinstance(src, str) else None)
+                fps = src.get("fps") if isinstance(src, dict) else None
+                vblock: Dict[str, Any] = {"type": "video_url", "video_url": {"url": url or ""}}
+                if fps is not None:
+                    vblock["video_url"]["fps"] = fps
+                out_parts.append(vblock)
+                changed = True
+            else:
+                out_parts.append(p)
+        return out_parts if changed else content
+        """
+        DeepSeek thinking-mode contract: assistant `reasoning_content` must be
+        echoed on every subsequent request (often including non-tool replies),
+        otherwise the API returns HTTP 400. Tool-call chains remain the strictest
+        case; plain multi-turn chat in thinking mode also requires the field.
+
+        Some strict OpenAI-compatible gateways reject unknown keys, so this is
+        gated behind an env flag, with a safe auto-enable for DeepSeek's
+        official endpoint.
+        """
+        from seed.core.model_providers import resolve_chat_protocol, should_send_reasoning_content
+
+        proto = chat_protocol or resolve_chat_protocol(provider="", base_url=base_url or "")
+        return should_send_reasoning_content(chat_protocol=proto, base_url=base_url or "")
+
     include_rc = _should_send_reasoning_content()
     _deepseek_proto = (chat_protocol or "") == "deepseek" or (
         not chat_protocol and _is_deepseek_url(base_url)
@@ -585,7 +779,12 @@ def _openai_chat_messages(
             continue
         row = {"role": role}
         if "content" in m:
-            row["content"] = m["content"]
+            content = m["content"]
+            if chat_protocol in ("minimax", "minimax_anthropic") or (
+                not chat_protocol and base_url and "minimaxi.com" in base_url.lower()
+            ):
+                content = _normalize_minimax_multimodal(content)
+            row["content"] = content
         if m.get("name"):
             row["name"] = m["name"]
         if m.get("tool_calls"):
@@ -668,6 +867,499 @@ def _msg_text_to_str(raw: Any) -> str:
 
 
 msg_text_to_str = _msg_text_to_str
+
+
+# ---------------------------------------------------------------------------
+# MiniMax-specific helpers: ``<think>`` tag stripping + reasoning_details
+# ---------------------------------------------------------------------------
+
+_THINK_TAG_RE = re.compile(r"<think>\s*(.*?)\s*</think>", re.IGNORECASE | re.DOTALL)
+
+
+def _strip_think_tags(content: str) -> tuple[str, str]:
+    """Strip ``<think>...</think>`` blocks from MiniMax-M2.x responses.
+
+    Returns ``(cleaned_content, extracted_thinking)``.  The thinking text is
+    concatenated from every ``<think>`` block (in order) so we can surface it
+    alongside the visible reply instead of leaking raw CoT into chat history.
+    Empty tuples are returned when the content has no think tag.
+    """
+    if not content or "<think>" not in content.lower():
+        return content, ""
+    parts: List[str] = []
+    last_end = 0
+    for m in _THINK_TAG_RE.finditer(content):
+        parts.append(m.group(1))
+        last_end = m.end()
+    cleaned = _THINK_TAG_RE.sub("", content).strip()
+    thinking = "\n\n".join(p.strip() for p in parts if p and p.strip())
+    return cleaned, thinking
+
+
+def _extract_reasoning_details_text(raw: Any) -> str:
+    """Flatten MiniMax-M3 ``reasoning_details`` list to a single text.
+
+    Schema (when ``reasoning_split=True``):
+        ``{"summary": [{"type": "summary_text", "text": "..."}]}``
+    Older variants use ``{"reasoning_text": "..."}``.  Empty string on miss.
+    """
+    if raw is None:
+        return ""
+    pieces: List[str] = []
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, dict):
+        summary = raw.get("summary")
+        if isinstance(summary, list):
+            for s in summary:
+                if isinstance(s, dict) and s.get("type") in ("summary_text", None):
+                    t = s.get("text")
+                    if isinstance(t, str) and t.strip():
+                        pieces.append(t)
+        rt = raw.get("reasoning_text")
+        if isinstance(rt, str) and rt.strip():
+            pieces.append(rt)
+        # 兼容 list 元素直接传 dict 的形态：{"type": "summary_text", "text": "..."}
+        if not pieces and raw.get("type") in ("summary_text", "reasoning_text", None) and isinstance(raw.get("text"), str):
+            pieces.append(raw["text"])
+        return "\n\n".join(pieces)
+    if isinstance(raw, list):
+        for item in raw:
+            t = _extract_reasoning_details_text(item)
+            if t:
+                pieces.append(t)
+        return "\n\n".join(pieces)
+    return ""
+
+
+def _to_minimax_anthropic_request(
+    messages: List[Dict[str, Any]],
+    *,
+    model: str,
+    max_tokens: int,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    enable_caching: bool = True,
+    extra_body: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Convert OpenAI-style chat messages → Anthropic Messages API payload.
+
+    Implements MiniMax Anthropic 主动缓存 by tagging the last block of
+    ``system`` / ``tools`` / and the last historical message with
+    ``cache_control: ephemeral`` (per Anthropic spec).  5 min TTL, auto-renewed
+    on subsequent calls.
+    """
+    sys_blocks: List[Dict[str, Any]] = []
+    api_messages: List[Dict[str, Any]] = []
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        role = str(m.get("role") or "")
+        content = m.get("content")
+        if role == "system":
+            text = content if isinstance(content, str) else _msg_text_to_str(content)
+            sys_blocks.append({"type": "text", "text": str(text or "")})
+            continue
+        if role == "tool":
+            api_messages.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": m.get("tool_call_id") or "",
+                            "content": content if isinstance(content, str) else _msg_text_to_str(content),
+                        }
+                    ],
+                }
+            )
+            continue
+        # user / assistant
+        anth_role = "assistant" if role == "assistant" else "user"
+        if isinstance(content, list):
+            blocks: List[Dict[str, Any]] = []
+            for p in content:
+                if not isinstance(p, dict):
+                    continue
+                ptype = p.get("type")
+                if ptype == "text" or isinstance(p.get("text"), str):
+                    blocks.append({"type": "text", "text": str(p.get("text") or "")})
+                elif ptype == "image_url":
+                    blocks.append(_anthropic_image_block(p.get("image_url")))
+                elif ptype == "video_url":
+                    blocks.append(_anthropic_video_block(p.get("video_url")))
+            api_messages.append({"role": anth_role, "content": blocks or [{"type": "text", "text": ""}]})
+        else:
+            text = content if isinstance(content, str) else _msg_text_to_str(content)
+            api_messages.append({"role": anth_role, "content": str(text or "")})
+        # Assistant tool_calls → tool_use blocks (extend the just-appended
+        # assistant message; do NOT pop the previous one).
+        if role == "assistant" and m.get("tool_calls") and api_messages:
+            last = api_messages[-1]
+            if last.get("role") == "assistant":
+                if isinstance(last.get("content"), list):
+                    content_blocks = list(last["content"])
+                elif isinstance(last.get("content"), str) and last["content"]:
+                    content_blocks = [{"type": "text", "text": last["content"]}]
+                else:
+                    content_blocks = []
+                for tc in m.get("tool_calls") or []:
+                    fn = (tc.get("function") or {}) if isinstance(tc, dict) else {}
+                    args = fn.get("arguments") or "{}"
+                    if not isinstance(args, str):
+                        try:
+                            args = json.dumps(args)
+                        except TypeError:
+                            args = "{}"
+                    content_blocks.append(
+                        {
+                            "type": "tool_use",
+                            "id": tc.get("id") or f"toolu_{len(content_blocks)}",
+                            "name": fn.get("name") or "",
+                            "input": _safe_json_loads(args),
+                        }
+                    )
+                last["content"] = content_blocks or [{"type": "text", "text": ""}]
+
+    # Apply cache_control to the last blocks of system / tools / last message.
+    if enable_caching and api_messages:
+        # 1) system
+        if sys_blocks:
+            sys_blocks[-1]["cache_control"] = {"type": "ephemeral"}
+    payload: Dict[str, Any] = {
+        "model": model,
+        "max_tokens": int(max_tokens),
+        "messages": api_messages,
+    }
+    if sys_blocks:
+        payload["system"] = sys_blocks
+    elif enable_caching:
+        # Even with no system prompt, send an empty one to anchor the cache.
+        payload["system"] = [{"type": "text", "text": "", "cache_control": {"type": "ephemeral"}}]
+
+    if tools:
+        anth_tools: List[Dict[str, Any]] = []
+        for t in tools:
+            if not isinstance(t, dict):
+                continue
+            fn = t.get("function") if isinstance(t.get("function"), dict) else t
+            if not isinstance(fn, dict) or not fn.get("name"):
+                continue
+            anth_tools.append(
+                {
+                    "name": str(fn.get("name") or ""),
+                    "description": str(fn.get("description") or ""),
+                    "input_schema": fn.get("parameters") or {"type": "object", "properties": {}},
+                }
+            )
+        if anth_tools:
+            if enable_caching:
+                anth_tools[-1]["cache_control"] = {"type": "ephemeral"}
+            payload["tools"] = anth_tools
+    if enable_caching and api_messages:
+        tail = api_messages[-1]
+        if isinstance(tail.get("content"), list) and tail["content"]:
+            tail["content"][-1].setdefault("cache_control", {"type": "ephemeral"})
+        elif isinstance(tail.get("content"), str) and tail["content"]:
+            # Anthropic requires a list of blocks; wrap the trailing string
+            # and tag the new block for cache_control.
+            tail["content"] = [
+                {
+                    "type": "text",
+                    "text": tail["content"],
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
+
+    if extra_body:
+        # Carry through thinking / reasoning_split etc.
+        for k, v in extra_body.items():
+            if k in ("reasoning_split",):
+                continue
+            payload.setdefault(k, v)
+    return payload
+
+
+def _safe_json_loads(s: str) -> Dict[str, Any]:
+    try:
+        loaded = json.loads(s)
+    except (ValueError, TypeError):
+        return {"_raw": s}
+    return loaded if isinstance(loaded, dict) else {"_raw": loaded}
+
+
+def _anthropic_image_block(image_url: Any) -> Dict[str, Any]:
+    """Best-effort conversion: pass through URL or data URL."""
+    if isinstance(image_url, str):
+        return {"type": "image", "source": {"type": "url", "url": image_url}}
+    if isinstance(image_url, dict):
+        url = image_url.get("url") or ""
+        if url.startswith("data:"):
+            media_type, _, b64 = url.partition(";base64,")
+            media_type = media_type[len("data:"):] if media_type.startswith("data:") else "image/jpeg"
+            return {
+                "type": "image",
+                "source": {"type": "base64", "media_type": media_type, "data": b64},
+            }
+        return {"type": "image", "source": {"type": "url", "url": url}}
+    return {"type": "text", "text": "[unsupported image input]"}
+
+
+def _anthropic_video_block(video_url: Any) -> Dict[str, Any]:
+    """MiniMax accepts video_url on /anthropic/v1/messages (MP4/AVI/MOV/MKV)."""
+    if isinstance(video_url, str):
+        return {"type": "video", "source": {"type": "url", "url": video_url}}
+    if isinstance(video_url, dict):
+        return {"type": "video", "source": {"type": "url", "url": video_url.get("url") or ""}}
+    return {"type": "text", "text": "[unsupported video input]"}
+
+
+def _parse_minimax_anthropic_response(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert Anthropic Messages response → OpenAI-style chat completion shape
+    so the rest of the LLM stack (tool_calls / reasoning extraction) keeps working.
+    """
+    if not isinstance(data, dict):
+        raise LLMError("MiniMax Anthropic response invalid: not a dict")
+    content = data.get("content") or []
+    text_parts: List[str] = []
+    thinking_parts: List[str] = []
+    tool_calls: List[Dict[str, Any]] = []
+    for block in content if isinstance(content, list) else []:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "text":
+            text_parts.append(str(block.get("text") or ""))
+        elif btype == "thinking":
+            thinking_parts.append(str(block.get("thinking") or ""))
+        elif btype == "tool_use":
+            tool_calls.append(
+                {
+                    "id": block.get("id") or f"toolu_{len(tool_calls)}",
+                    "type": "function",
+                    "function": {
+                        "name": block.get("name") or "",
+                        "arguments": json.dumps(block.get("input") or {}, ensure_ascii=False),
+                    },
+                }
+            )
+    stop_reason = data.get("stop_reason") or "end_turn"
+    return {
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": stop_reason,
+                "message": {
+                    "role": "assistant",
+                    "content": "".join(text_parts),
+                    "tool_calls": tool_calls or None,
+                    "reasoning_content": "\n\n".join(thinking_parts) if thinking_parts else "",
+                },
+            }
+        ],
+        "usage": data.get("usage") or {},
+        "model": data.get("model") or "",
+    }
+
+
+def normalize_minimax_usage(usage: Dict[str, Any]) -> Dict[str, Any]:
+    """Map MiniMax usage payload → internal ``usage_accumulator`` keys.
+
+    MiniMax (OpenAI 兼容 + Anthropic 兼容) 响应:
+        ``usage.prompt_tokens_details.cached_tokens`` → 缓存命中
+        ``usage.cache_read_input_tokens``           → Anthropic 兼容
+        ``usage.cache_creation_input_tokens``        → 主动缓存创建量
+    Internal keys consumed by ``usage_accumulator``:
+        ``prompt_cache_hit_tokens``  /  ``prompt_cache_miss_tokens``
+    """
+    if not isinstance(usage, dict) or not usage:
+        return usage or {}
+    out = dict(usage)
+    cached = 0
+    try:
+        details = usage.get("prompt_tokens_details")
+        if isinstance(details, dict):
+            v = details.get("cached_tokens")
+            if isinstance(v, (int, float)):
+                cached += int(v)
+    except Exception:
+        pass
+    for k in ("cache_read_input_tokens", "cache_creation_input_tokens"):
+        v = usage.get(k)
+        if isinstance(v, (int, float)):
+            cached += int(v)
+    if cached > 0:
+        out["prompt_cache_hit_tokens"] = cached
+        try:
+            pt = usage.get("prompt_tokens")
+            if isinstance(pt, (int, float)):
+                out["prompt_cache_miss_tokens"] = max(0, int(pt) - cached)
+        except Exception:
+            pass
+    return out
+
+
+MINIMAX_CONTEXT_WINDOWS: Dict[str, int] = {
+    "MiniMax-M3": 1_000_000,
+    "MiniMax-M2.7": 204_800,
+    "MiniMax-M2.7-highspeed": 204_800,
+    "MiniMax-M2.5": 204_800,
+    "MiniMax-M2.5-highspeed": 204_800,
+    "MiniMax-M2.1": 204_800,
+    "MiniMax-M2.1-highspeed": 204_800,
+    "MiniMax-M2": 204_800,
+    "MiniMax-M2-Her": 64_000,
+    "MiniMax-Text-01": 4_000_000,
+    "MiniMax-VL-01": 4_000_000,
+}
+# 512K is the threshold where MiniMax-M3 starts charging the long-context
+# price.  See https://platform.minimaxi.com/docs/api-reference/text-prompt-caching
+MINIMAX_LONG_CONTEXT_THRESHOLD = 512_000
+
+
+def _minimax_input_tokens_url(base_url: str) -> str:
+    """Resolve MiniMax token-estimation endpoint from preset base_url."""
+    base = (base_url or "").strip().rstrip("/")
+    if base.endswith("/v1/responses/input_tokens"):
+        return base
+    if base.endswith("/v1/responses"):
+        return f"{base}/input_tokens"
+    if base.endswith("/v1"):
+        return f"{base}/responses/input_tokens"
+    return f"{base}/v1/responses/input_tokens"
+
+
+def _to_minimax_responses_input(
+    messages: List[Dict[str, Any]],
+    tools: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    """Convert OpenAI-style chat messages to MiniMax Responses API ``input`` items.
+
+    Only the fields the input-tokens endpoint needs are populated; the endpoint
+    does not actually invoke the model, so we keep the payload small.
+    """
+    out: List[Dict[str, Any]] = []
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        role = str(m.get("role") or "user")
+        content = m.get("content")
+        if isinstance(content, list):
+            parts: List[Dict[str, Any]] = []
+            for p in content:
+                if isinstance(p, dict):
+                    if p.get("type") == "text":
+                        parts.append({"type": "input_text", "text": str(p.get("text") or "")})
+                    elif p.get("type") == "image_url":
+                        parts.append({"type": "input_image", "image_url": p.get("image_url") or ""})
+                    elif p.get("type") == "video_url":
+                        parts.append({"type": "input_video", "video_url": p.get("video_url") or ""})
+                    elif isinstance(p.get("text"), str):
+                        parts.append({"type": "input_text", "text": str(p.get("text") or "")})
+                elif isinstance(p, str):
+                    parts.append({"type": "input_text", "text": p})
+            out.append({"type": "message", "role": role, "content": parts})
+        else:
+            out.append({"type": "message", "role": role, "content": str(content or "")})
+    if tools:
+        out_tools: List[Dict[str, Any]] = []
+        for t in tools:
+            if not isinstance(t, dict):
+                continue
+            fn = t.get("function") if isinstance(t.get("function"), dict) else t
+            if not isinstance(fn, dict) or not fn.get("name"):
+                continue
+            out_tools.append(
+                {
+                    "type": "function",
+                    "name": str(fn.get("name") or ""),
+                    "description": str(fn.get("description") or ""),
+                    "parameters": fn.get("parameters") or {"type": "object", "properties": {}},
+                }
+            )
+        if out_tools:
+            return out, out_tools
+    return out
+
+
+def estimate_minimax_tokens(
+    *,
+    base_url: str,
+    api_key: str,
+    auth_scheme: str = "Bearer",
+    model: str,
+    messages: List[Dict[str, Any]],
+    tools: Optional[List[Dict[str, Any]]] = None,
+    reasoning_effort: Optional[str] = None,
+    timeout: float = 30.0,
+) -> Dict[str, Any]:
+    """Call ``POST /v1/responses/input_tokens`` to estimate prompt size.
+
+    Returns ``{"input_tokens": int, "raw": dict}``.  Raises ``LLMError`` on
+    transport failure or invalid response.
+    """
+    if not api_key:
+        raise LLMError("MiniMax input_tokens estimate requires an API key")
+    input_items, out_tools = _to_minimax_responses_input(messages, tools)  # type: ignore[misc]
+    payload: Dict[str, Any] = {"model": model, "input": input_items}
+    if out_tools:
+        payload["tools"] = out_tools
+    if reasoning_effort:
+        payload["reasoning"] = {"effort": reasoning_effort}
+    url = _minimax_input_tokens_url(base_url)
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"{auth_scheme} {api_key}",
+    }
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+    except requests.exceptions.RequestException as e:
+        raise LLMError(f"MiniMax input_tokens request failed: {e}", original_error=e)
+    if resp.status_code >= 400:
+        try:
+            body = resp.json()
+            detail = body.get("base_resp", {}).get("status_msg") if isinstance(body, dict) else None
+        except Exception:
+            detail = None
+        raise LLMError(
+            f"MiniMax input_tokens failed ({resp.status_code}): {detail or resp.text[:500]}"
+        )
+    try:
+        body = resp.json()
+    except ValueError as e:
+        raise LLMError(f"MiniMax input_tokens returned invalid JSON: {e}", original_error=e)
+    if not isinstance(body, dict):
+        raise LLMError("MiniMax input_tokens returned unexpected body")
+    n = body.get("input_tokens")
+    if not isinstance(n, (int, float)):
+        raise LLMError(f"MiniMax input_tokens missing input_tokens: {body!r}")
+    return {"input_tokens": int(n), "raw": body}
+
+
+def precheck_minimax_context(
+    *,
+    model: str,
+    estimated_input_tokens: int,
+    context_override: Optional[int] = None,
+) -> Optional[str]:
+    """Return an error message if ``estimated_input_tokens`` exceeds the
+    model's context window; ``None`` when within budget.
+
+    ``context_override`` lets callers inject a custom budget (e.g. via
+    ``SEED_LLM_CONTEXT_SIZE``); otherwise the catalog mapping is used.
+    """
+    if context_override is not None and context_override > 0:
+        window = int(context_override)
+    else:
+        window = MINIMAX_CONTEXT_WINDOWS.get(str(model) or "", 0)
+    if window <= 0:
+        return None
+    if estimated_input_tokens > window:
+        return (
+            f"Estimated input tokens ({estimated_input_tokens}) exceed model "
+            f"'{model}' context window ({window}). Shorten the conversation "
+            "or switch to a larger-context model."
+        )
+    return None
 
 
 def _extract_tool_calls(msg: Dict[str, Any]) -> List[Dict[str, Any]]:

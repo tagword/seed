@@ -261,3 +261,10 @@ def test_build_api_projection_messages_heals_real_broken_session() -> None:
             for tc in m.get("tool_calls") or []:
                 asst_calls.append(tc["id"])
     assert "call_function_efq2r9fxz1qp_1" not in asst_calls
+    # Orphan tool response must not survive — MiniMax returns HTTP 400 otherwise.
+    tool_ids = [
+        m.get("tool_call_id")
+        for m in api
+        if m.get("role") == "tool"
+    ]
+    assert "call_function_efq2r9fxz1qp_1" not in tool_ids

@@ -23,6 +23,7 @@ _vision_preset_id: ContextVar[str] = ContextVar("vision_preset_id", default="")
 _image_gen_preset_id: ContextVar[str] = ContextVar("image_gen_preset_id", default="")
 _audio_preset_id: ContextVar[str] = ContextVar("audio_preset_id", default="")
 _music_preset_id: ContextVar[str] = ContextVar("music_preset_id", default="")
+_video_gen_preset_id: ContextVar[str] = ContextVar("video_gen_preset_id", default="")
 _active_agent_id: ContextVar[str] = ContextVar("active_agent_id", default="")
 
 
@@ -136,6 +137,18 @@ def get_active_music_preset() -> str:
 
 def clear_active_music_preset() -> None:
     _music_preset_id.set("")
+
+
+def set_active_video_gen_preset(preset_id: Optional[str]) -> None:
+    _video_gen_preset_id.set((preset_id or "").strip())
+
+
+def get_active_video_gen_preset() -> str:
+    return _video_gen_preset_id.get() or ""
+
+
+def clear_active_video_gen_preset() -> None:
+    _video_gen_preset_id.set("")
 
 
 def set_active_agent_id(agent_id: Optional[str]) -> None:

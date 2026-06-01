@@ -111,6 +111,7 @@ def test_infer_use_type_for_provider_model() -> None:
     assert infer_use_type_for_provider_model("minimax", "image-01") == "image"
     assert infer_use_type_for_provider_model("minimax", "speech-2.8-turbo") == "speech"
     assert infer_use_type_for_provider_model("minimax", "music-2.6") == "music"
+    assert infer_use_type_for_provider_model("agnes", "agnes-video-v2.0") == "video_gen"
     assert infer_use_type_for_provider_model("minimax", "MiniMax-M2.7") == "chat"
     assert infer_use_type_for_provider_model("deepseek", "deepseek-v4-flash") == "chat"
     assert (
@@ -119,6 +120,42 @@ def test_infer_use_type_for_provider_model() -> None:
     )
     assert infer_preset_use_type({"supports_speech": True}) == "speech"
     assert infer_preset_use_type({"supports_music": True}) == "music"
+    assert infer_preset_use_type({"supports_video_gen": True}) == "video_gen"
+
+
+def test_materialize_preset_from_form_video_gen() -> None:
+    from seed.core.model_providers import materialize_preset_from_form
+
+    out = materialize_preset_from_form(
+        {
+            "provider": "agnes",
+            "use_type": "video_gen",
+            "model": "agnes-video-v2.0",
+            "api_key": "sk-test",
+        }
+    )
+    assert out["use_type"] == "video_gen"
+    assert out["supports_video_gen"] is True
+    assert out["supports_music"] is False
+    assert out["model"] == "agnes-video-v2.0"
+
+
+def test_agnes_videos_url() -> None:
+    from seed.core.model_providers import _agnes_videos_url
+
+    assert (
+        _agnes_videos_url("https://apihub.agnes-ai.com/v1")
+        == "https://apihub.agnes-ai.com/v1/videos"
+    )
+
+
+def test_minimax_music_url() -> None:
+    from seed.core.model_providers import _minimax_music_url
+
+    assert (
+        _minimax_music_url("https://api.minimaxi.com/v1")
+        == "https://api.minimaxi.com/v1/music_generation"
+    )
 
 
 def test_materialize_preset_from_form_music() -> None:
@@ -136,15 +173,6 @@ def test_materialize_preset_from_form_music() -> None:
     assert out["supports_music"] is True
     assert out["supports_speech"] is False
     assert out["model"] == "music-2.6"
-
-
-def test_minimax_music_url() -> None:
-    from seed.core.model_providers import _minimax_music_url
-
-    assert (
-        _minimax_music_url("https://api.minimaxi.com/v1")
-        == "https://api.minimaxi.com/v1/music_generation"
-    )
 
 
 def test_materialize_preset_from_form_speech() -> None:

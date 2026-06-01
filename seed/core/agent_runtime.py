@@ -582,6 +582,43 @@ def _clean_orphaned_tool_calls(messages: List[Dict[str, Any]]) -> None:
         i -= 1
 
 
+def _clean_orphaned_tool_results(messages: List[Dict[str, Any]]) -> None:
+    """In-place: remove ``tool`` messages whose ``tool_call_id`` is unmatched.
+
+    ``_clean_invalid_tool_call_arguments`` can strip malformed ``tool_calls`` from
+    an assistant turn while leaving its ``tool`` responses in place.  Strict
+    providers (MiniMax, DeepSeek, …) then reject the next request with HTTP 400
+    ``tool result's tool id … not found``.
+    """
+    if not messages:
+        return
+    valid_ids: set[str] = set()
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        for tc in msg.get("tool_calls") or []:
+            if not isinstance(tc, dict):
+                continue
+            tid = (tc.get("id") or "").strip()
+            if tid:
+                valid_ids.add(tid)
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+        if not isinstance(msg, dict) or msg.get("role") != "tool":
+            i += 1
+            continue
+        tid = (msg.get("tool_call_id") or "").strip()
+        if tid and tid not in valid_ids:
+            logger.warning(
+                "Removing orphaned tool result (tool_call_id=%r has no assistant tool_call)",
+                tid,
+            )
+            messages.pop(i)
+            continue
+        i += 1
+
+
 _AUTO_CONTINUE_NUDGE_PREFIXES = (
     "请继续完成未完成事项",
     "上一段连续在",
@@ -722,6 +759,7 @@ def build_api_projection_messages(
     _clean_invalid_tool_call_arguments(api)
     _sweep_empty_invalid_tc_turns(api)
     _clean_orphaned_tool_calls(api)
+    _clean_orphaned_tool_results(api)
     return api
 
 
