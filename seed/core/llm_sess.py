@@ -20,7 +20,17 @@ from typing import Any, Dict, List, Optional
 from seed.core import env_access as _ea
 from seed.core.models import Session
 from seed.core.paths import agent_home, agent_id_default, agent_project_data_subdir
-from seed.core.proj_reg import list_projects
+from seed.core.proj_reg import (
+    UNASSIGNED_PROJECT_ID,
+    get_session_meta,
+    list_project_session_ids,
+    list_project_sessions_meta,
+    list_projects,
+    list_unassigned_session_ids,
+    register_session,
+    unregister_session,
+    update_session_meta,
+)
 from seed.core.sess_store import SessionStore
 
 _SAFE_RE = re.compile(r"[^a-zA-Z0-9._-]+")
@@ -292,30 +302,38 @@ def load_chat_session_from_disk(
     """
     Load Session JSON from disk.
 
-    查找顺序：
-    1. 如果指定了 project_id → 先从项目会话目录找
-    2. 如果没找到或没指定 → 从默认 agent sessions 目录找（含 legacy llm_sessions 回退）
-    3. 如果还没找到且未指定 project_id → 搜索所有项目目录
+    查找顺序（v2）：
+    1. 如果指定了 project_id → 先从 registry 定位，再从项目会话目录加载
+    2. 如果没找到或没指定 → 从 registry 搜索所有项目
+    3. 回退：从默认 agent sessions 目录扫描（兼容旧数据/未注册会话）
 
     ``handle`` is the user-visible key (CLI --session or browser session_id).
     """
     aid = (agent_id or "").strip() or agent_id_default()
-
-    # 如果指定了项目，先查项目目录
     pid = (project_id or "").strip() if project_id else ""
+
+    # 优先从 registry 定位
+    reg_path = _session_file_path_from_registry(handle, aid, pid)
+    if reg_path is not None:
+        store = SessionStore(str(reg_path.parent))
+        found = _try_load_from_store(store, handle)
+        if found is not None:
+            return found
+
+    # 如果指定了项目，直接查项目目录
     if pid:
         pstore = _project_session_store(pid, aid)
         found = _try_load_from_store(pstore, handle)
         if found is not None:
             return found
 
-    # 再查默认目录（新布局，再 legacy 子目录）
+    # 回退：默认目录
     for d in _default_session_search_dirs(aid):
         found = _try_load_from_store(SessionStore(str(d)), handle)
         if found is not None:
             return found
 
-    # 如果未指定 project_id，搜索所有项目目录作为后备
+    # 回退：搜索所有项目目录
     if not pid:
         for proj in list_projects(aid):
             pstore = _project_session_store(proj["id"], aid)
@@ -419,6 +437,87 @@ def _scan_default_agent_session_dirs(
     return _merge_session_meta_rows(rows, limit=limit)
 
 
+def _session_file_path_from_registry(
+    session_id: str,
+    agent_id: str,
+    project_id: str = "",
+) -> Optional[Path]:
+    """根据 registry 中的会话注册信息，返回会话文件路径。
+
+    优先从 registry 定位，回退到目录扫描。
+    """
+    slug = _safe_session_filename(session_id)
+    aid = (agent_id or "").strip() or agent_id_default()
+    pid = (project_id or "").strip()
+
+    # 如果指定了 project_id，先查该项目的注册列表
+    if pid:
+        registered = list_project_session_ids(aid, pid)
+        if session_id in registered:
+            p = _project_sessions_dir(pid, aid) / f"{slug}.json"
+            if p.is_file():
+                return p
+        # 注册了但文件不存在，也尝试直接读目录
+        p = _project_sessions_dir(pid, aid) / f"{slug}.json"
+        if p.is_file():
+            return p
+        return None
+
+    # 无 project_id：扫描所有项目注册表
+    for proj in list_projects(aid):
+        registered = list_project_session_ids(aid, proj["id"])
+        if session_id in registered:
+            p = _project_sessions_dir(proj["id"], aid) / f"{slug}.json"
+            if p.is_file():
+                return p
+    return None
+
+
+def _load_session_json(
+    path: Path,
+) -> Optional[Dict[str, Any]]:
+    """安全加载会话 JSON 文件。"""
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _session_meta_from_json(
+    path: Path,
+    data: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """从 JSON 数据提取会话元信息行。"""
+    if data is None:
+        data = _load_session_json(path)
+    if data is None:
+        return None
+    msgs = data.get("messages")
+    n_msg = _count_user_messages(msgs)
+    name = data.get("name")
+    sid = str(name).strip() if isinstance(name, str) and name.strip() else path.stem
+    meta = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    cfg = data.get("config") if isinstance(data.get("config"), dict) else {}
+    preview = ""
+    if isinstance(msgs, list):
+        for m in reversed(msgs):
+            if isinstance(m, dict) and m.get("role") == "user":
+                preview = str(m.get("content") or "")[:120]
+                break
+    display_title = _session_display_title(preview, meta)
+    channel = _infer_channel(sid, meta, cfg)
+    return {
+        "session_id": sid,
+        "file_id": str(data.get("id") or path.stem),
+        "updated_at": str(data.get("updated_at") or ""),
+        "message_count": n_msg,
+        "preview": preview,
+        "display_title": display_title,
+        "channel": channel,
+        "project_id": str(meta.get("project_id") or "").strip(),
+    }
+
+
 def list_stored_sessions_meta(
     *,
     limit: int = 100,
@@ -429,11 +528,16 @@ def list_stored_sessions_meta(
     """
     Recent chat sessions from disk (for Web UI / tooling).
 
+    查询策略（v4）：
+      - 所有会话都通过 registry 管理（含虚拟项目 __unassigned__）
+      - 优先从 registry 缓存读取元信息（无需加载 JSON 文件）
+      - 缓存缺失时回退加载 JSON 文件并自动补全缓存
+
     When ``filter_by_project`` is True:
-      - If ``filter_project_id`` is set → scan that project's session dir
-      - If ``filter_project_id`` is empty → scan default (non-project) sessions
+      - If ``filter_project_id`` is set → list sessions for that project from registry cache
+      - If ``filter_project_id`` is empty → list sessions under virtual __unassigned__ project
     When ``filter_by_project`` is False:
-      - Scan default directory + all project directories
+      - List all sessions from all projects (including __unassigned__)
     """
     aid = (agent_id or "").strip() or agent_id_default()
     lim = max(1, min(int(limit), 500))
@@ -441,86 +545,188 @@ def list_stored_sessions_meta(
     if filter_by_project:
         want = (filter_project_id or "").strip()
         if want:
-            pdir = _project_sessions_dir(want, aid)
-            return _scan_session_dir(
-                pdir,
-                limit=lim,
-                filter_by_project=True,
-                filter_project_id=want,
-            )
-        return _scan_default_agent_session_dirs(
-            aid,
-            limit=lim,
-            filter_by_project=True,
-            filter_project_id="",
-        )
+            return _list_sessions_for_project_from_cache(aid, want, lim)
+        # 未分类 = 虚拟项目 __unassigned__
+        return _list_sessions_for_project_from_cache(aid, UNASSIGNED_PROJECT_ID, lim)
 
-    rows = _scan_default_agent_session_dirs(
-        aid,
-        limit=lim,
-        filter_by_project=False,
-        filter_project_id="",
-    )
-
-    if len(rows) >= lim:
-        return rows[:lim]
+    # 全部会话：所有项目（含虚拟项目）
+    rows: List[Dict[str, Any]] = []
+    seen_sids: set[str] = set()
 
     for proj in list_projects(aid):
         if len(rows) >= lim:
             break
-        pid = proj["id"]
-        pdir = _project_sessions_dir(pid, aid)
-        rows.extend(
-            _scan_session_dir(
-                pdir,
-                limit=lim,
-                filter_by_project=False,
-                filter_project_id="",
+        for sid, cached_meta in list_project_sessions_meta(aid, proj["id"]).items():
+            if len(rows) >= lim:
+                break
+            if sid in seen_sids:
+                continue
+            seen_sids.add(sid)
+            row = _meta_row_from_cache(sid, cached_meta, proj["id"])
+            if row is not None:
+                rows.append(row)
+
+    rows.sort(key=lambda r: r.get("updated_at", ""), reverse=True)
+    return rows[:lim]
+
+
+def _meta_row_from_cache(
+    session_id: str,
+    cached_meta: Dict[str, Any],
+    project_id: str,
+) -> Optional[Dict[str, Any]]:
+    """从 registry 缓存构建会话元信息行。缓存缺失时回退加载 JSON。"""
+    if cached_meta and cached_meta.get("display_title"):
+        return {
+            "session_id": session_id,
+            "file_id": session_id,
+            "updated_at": str(cached_meta.get("updated_at") or ""),
+            "message_count": int(cached_meta.get("message_count") or 0),
+            "preview": str(cached_meta.get("preview") or "")[:120],
+            "display_title": str(cached_meta.get("display_title") or "未命名对话")[:80],
+            "channel": str(cached_meta.get("channel") or "Web 聊天")[:48],
+            "project_id": project_id,
+        }
+    # 缓存缺失，回退加载 JSON
+    meta = _load_session_meta_by_id(session_id, None, project_id)
+    if meta is not None:
+        # 尝试更新缓存
+        try:
+            from seed.core.proj_reg import update_session_meta
+            update_session_meta(
+                agent_id_default(), project_id, session_id,
+                {
+                    "display_title": meta.get("display_title", ""),
+                    "updated_at": meta.get("updated_at", ""),
+                    "message_count": meta.get("message_count", 0),
+                    "preview": meta.get("preview", ""),
+                    "channel": meta.get("channel", ""),
+                },
             )
-        )
-    return _merge_session_meta_rows(rows, limit=lim)
+        except Exception:
+            pass
+    return meta
+
+
+def _list_sessions_for_project_from_cache(
+    agent_id: str, project_id: str, limit: int,
+) -> List[Dict[str, Any]]:
+    """从 registry 缓存列出项目下的会话（无需加载 JSON 文件）。"""
+    aid = (agent_id or "").strip() or agent_id_default()
+    pid = (project_id or "").strip()
+    rows: List[Dict[str, Any]] = []
+    for sid, cached_meta in list_project_sessions_meta(aid, pid).items():
+        if len(rows) >= limit:
+            break
+        row = _meta_row_from_cache(sid, cached_meta, pid)
+        if row is not None:
+            rows.append(row)
+    rows.sort(key=lambda r: r.get("updated_at", ""), reverse=True)
+    return rows[:limit]
+
+
+def _list_unassigned_sessions(
+    agent_id: str, limit: int,
+    exclude_sids: Optional[set[str]] = None,
+) -> List[Dict[str, Any]]:
+    """列出未注册到任何项目的会话（回退扫描目录）。"""
+    aid = (agent_id or "").strip() or agent_id_default()
+    assigned = list_unassigned_session_ids(aid)
+    exclude = set(exclude_sids or [])
+    exclude.update(assigned)
+
+    rows: List[Dict[str, Any]] = []
+    for d in _default_session_search_dirs(aid):
+        if len(rows) >= limit:
+            break
+        for path in sorted(d.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+            if len(rows) >= limit:
+                break
+            data = _load_session_json(path)
+            if data is None:
+                continue
+            name = data.get("name")
+            sid = str(name).strip() if isinstance(name, str) and name.strip() else path.stem
+            if sid in exclude:
+                continue
+            meta = _session_meta_from_json(path, data)
+            if meta is not None:
+                rows.append(meta)
+    rows.sort(key=lambda r: r.get("updated_at", ""), reverse=True)
+    return rows[:limit]
+
+
+def _load_session_meta_by_id(
+    session_id: str, agent_id: str, project_id: str = "",
+) -> Optional[Dict[str, Any]]:
+    """按 session_id 和 project_id 加载会话元信息。"""
+    path = _session_file_path_from_registry(session_id, agent_id, project_id)
+    if path is not None:
+        return _session_meta_from_json(path)
+    # 回退：直接扫描目录
+    slug = _safe_session_filename(session_id)
+    aid = (agent_id or "").strip() or agent_id_default()
+    pid = (project_id or "").strip()
+    if pid:
+        p = _project_sessions_dir(pid, aid) / f"{slug}.json"
+        if p.is_file():
+            return _session_meta_from_json(p)
+    for d in _default_session_search_dirs(aid):
+        p = d / f"{slug}.json"
+        if p.is_file():
+            return _session_meta_from_json(p)
+    return None
 
 
 def list_stored_session_ids(
     agent_id: Optional[str] = None,
     project_id: Optional[str] = None,
 ) -> List[str]:
-    """列出会话 ID。如果指定 project_id，则只扫描项目目录。"""
-    aid = (agent_id or "").strip() or agent_id_default()
+    """列出会话 ID。
 
-    seen: List[str] = []
-    added: set[str] = set()
-    dirs = (
-        [_project_sessions_dir(project_id, aid)]
-        if project_id
-        else _default_session_search_dirs(aid)
-    )
-    paths: List[Path] = []
-    for d in dirs:
+    如果指定 project_id，则从 registry 读取该项目的会话列表。
+    否则扫描所有目录（兼容旧数据）。
+    """
+    aid = (agent_id or "").strip() or agent_id_default()
+    pid = (project_id or "").strip() if project_id else ""
+
+    if pid:
+        return list_project_session_ids(aid, pid)
+
+    # 全部会话：从 registry 收集 + 扫描未注册的
+    seen: set[str] = set()
+    result: List[str] = []
+
+    for proj in list_projects(aid):
+        for sid in list_project_session_ids(aid, proj["id"]):
+            if sid not in seen:
+                seen.add(sid)
+                result.append(sid)
+
+    # 回退扫描未注册的
+    for d in _default_session_search_dirs(aid):
         if d.is_dir():
-            paths.extend(sorted(d.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True))
-    paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    for path in paths:
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            name = data.get("name")
-            sid = data.get("session_id")
-            oid = data.get("id")
-            if isinstance(name, str) and name.strip():
-                key = name.strip()
-            elif isinstance(sid, str) and sid.strip():
-                key = sid.strip()
-            elif isinstance(oid, str) and oid.strip():
-                key = oid.strip()
-            else:
-                key = path.stem
-        except (json.JSONDecodeError, OSError):
-            key = path.stem
-        if key in added:
-            continue
-        added.add(key)
-        seen.append(key)
-    return seen
+            for path in sorted(d.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                    name = data.get("name")
+                    sid = data.get("session_id")
+                    oid = data.get("id")
+                    if isinstance(name, str) and name.strip():
+                        key = name.strip()
+                    elif isinstance(sid, str) and sid.strip():
+                        key = sid.strip()
+                    elif isinstance(oid, str) and oid.strip():
+                        key = oid.strip()
+                    else:
+                        key = path.stem
+                except (json.JSONDecodeError, OSError):
+                    key = path.stem
+                if key in seen:
+                    continue
+                seen.add(key)
+                result.append(key)
+    return result
 
 
 def _strip_non_leading_system(msgs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -555,6 +761,16 @@ def load_or_create_chat_session(
 ) -> Session:
     found = load_chat_session_from_disk(handle, agent_id, project_id)
     if found is not None:
+        # 🐛 修复：如果传入了 project_id 但会话 metadata 中缺少或不同，
+        # 则更新 project_id，确保后续 persist 存到正确的项目目录。
+        if project_id:
+            md = found.metadata
+            if not isinstance(md, dict):
+                md = {}
+            cur_pid = str(md.get("project_id") or "").strip()
+            if cur_pid != project_id:
+                md["project_id"] = project_id
+                found.metadata = md
         return found
     sess = Session.for_llm_handle(handle, _safe_session_filename(handle))
     if project_id:
@@ -572,12 +788,48 @@ def read_stored_session_project_id(handle: str, agent_id: Optional[str] = None) 
     return str(md.get("project_id") or "").strip()
 
 
+def _extract_session_meta(session: Session) -> Dict[str, Any]:
+    """从 Session 对象提取用于 registry 缓存的元信息。"""
+    handle = str(session.name or session.id or "").strip()
+    meta: Dict[str, Any] = {
+        "updated_at": str(session.updated_at or ""),
+        "message_count": _count_user_messages(session.messages),
+    }
+    if isinstance(session.metadata, dict):
+        dt = session.metadata.get("display_title")
+        if isinstance(dt, str) and dt.strip():
+            meta["display_title"] = dt.strip()[:80]
+        channel = session.metadata.get("channel") or session.metadata.get("source")
+        if isinstance(channel, str) and channel.strip():
+            meta["channel"] = channel.strip()[:48]
+    if not meta.get("display_title"):
+        # 从最后一条 user 消息提取预览
+        preview = ""
+        if isinstance(session.messages, list):
+            for m in reversed(session.messages):
+                if isinstance(m, dict) and m.get("role") == "user":
+                    preview = str(m.get("content") or "")[:120]
+                    break
+        meta["preview"] = preview
+        meta["display_title"] = _session_display_title(preview, session.metadata if isinstance(session.metadata, dict) else {})
+    else:
+        # 也尝试提取 preview
+        if isinstance(session.messages, list):
+            for m in reversed(session.messages):
+                if isinstance(m, dict) and m.get("role") == "user":
+                    meta["preview"] = str(m.get("content") or "")[:120]
+                    break
+    return meta
+
+
 def persist_chat_session(session: Session, agent_id: Optional[str] = None) -> Path:
     """持久化会话。
 
     根据 session.metadata.project_id 自动路由到：
       - 有项目 → projects-data/<project-id>/sessions/
       - 无项目 → agents/<id>/sessions/
+
+    写入后将会话 ID 及元信息缓存到项目 registry 中（如有 project_id）。
     """
     session.touch_updated()
     store = _resolve_session_store(session, agent_id)
@@ -586,6 +838,14 @@ def persist_chat_session(session: Session, agent_id: Optional[str] = None) -> Pa
     handle = str(session.name or session.id or "").strip()
     if handle:
         _remove_legacy_session_copy(handle, agent_id)
+    # 注册到项目 registry 并缓存元信息
+    # 无 project_id 的会话暂不注册（等发消息时 project_id 设好后再注册）
+    pid = ""
+    if isinstance(session.metadata, dict):
+        pid = str(session.metadata.get("project_id") or "").strip()
+    if pid and handle:
+        sess_meta = _extract_session_meta(session)
+        register_session(agent_id or agent_id_default(), pid, handle, sess_meta)
     return out
 
 
@@ -622,7 +882,10 @@ def delete_stored_session(
     agent_id: Optional[str] = None,
     project_id: Optional[str] = None,
 ) -> bool:
-    """Remove persisted chat session JSON for this session id."""
+    """Remove persisted chat session JSON for this session id.
+
+    同时从项目 registry 中注销该会话。
+    """
     path = _find_session_file(handle, agent_id, project_id)
     if path is None:
         return False
@@ -630,6 +893,11 @@ def delete_stored_session(
         path.unlink()
     except OSError:
         return False
+    # 从 registry 注销
+    aid = (agent_id or "").strip() or agent_id_default()
+    pid = (project_id or "").strip() if project_id else ""
+    if pid and handle:
+        unregister_session(aid, pid, handle)
     return True
 
 

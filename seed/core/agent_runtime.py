@@ -836,44 +836,154 @@ def _context_compact_enabled() -> bool:
     )
 
 
-def _messages_body_json_bytes(messages: List[Dict[str, Any]], body_start: int) -> int:
-    body = messages[body_start:]
-    raw = json.dumps(body, ensure_ascii=False)
-    return len(raw.encode("utf-8"))
+def _estimate_messages_tokens(messages: List[Dict[str, Any]], body_start: int) -> int:
+    """Estimate token count for messages body.
 
-
-def estimate_context_usage(messages: List[Dict[str, Any]]) -> Dict[str, int]:
+    Uses DeepSeek tokenizer (via codeagent.core.token_counter) when available,
+    falls back to simple heuristic. Includes ~1500 token overhead for tool schemas.
     """
-    Fallback context size for UI when the latest LLM round has no ``usage`` yet
-    (e.g. right after tool results are appended, before the next model call).
-  """
+    try:
+        from codeagent.core.token_counter import count_messages as _cnt_msgs
+        body = messages[body_start:]
+        # count_messages includes the remaining messages + schema overhead
+        counted = _cnt_msgs(body)
+        total = counted.get("total_tokens", 0) or 0
+        # Add tool-call schema overhead (~1500 tokens for typical tool registry)
+        total += 1500
+        return total
+    except Exception:
+        pass
+    try:
+        from seed.core.llm_exec import msg_text_to_str as _mts
+        from codeagent.core.token_counter import count_tokens as _cnt_tok
+        total = 0
+        for m in messages[body_start:]:
+            content = m.get("content")
+            if content is None and m.get("tool_calls"):
+                content = json.dumps(m.get("tool_calls"), ensure_ascii=False)
+            text = _mts(content) if content else ""
+            total += _cnt_tok(text) + 4
+        total += 1500
+        return total
+    except Exception:
+        body = messages[body_start:]
+        raw = json.dumps(body, ensure_ascii=False)
+        return len(raw.encode("utf-8")) // 4
+
+
+# Runtime override for compact min tokens (set via API, not persisted)
+_compact_min_tokens_override: Optional[int] = None
+
+def set_compact_min_tokens(val: int) -> None:
+    """Set runtime override for compact min tokens (0 = disable)."""
+    global _compact_min_tokens_override
+    _compact_min_tokens_override = max(0, int(val))
+
+def _get_compact_min_tokens() -> int:
+    """Get compact trigger threshold in tokens (default: 30000).
+
+    Priority: runtime override > env var > default 30000.
+    """
+    global _compact_min_tokens_override
+    if _compact_min_tokens_override is not None and _compact_min_tokens_override > 0:
+        return _compact_min_tokens_override
+    tok = _ea.pick_nonempty(*_ea.CONTEXT_COMPACT_MIN_TOKENS)
+    if tok:
+        return max(1000, int(tok))
+    return 30000
+
+
+# Known model context windows (beyond MiniMax catalog)
+_KNOWN_CONTEXT_WINDOWS: Dict[str, int] = {
+    "deepseek": 128_000,
+    "gpt-4": 128_000,
+    "gpt-3.5": 16_000,
+    "claude": 200_000,
+    "gemini": 1_000_000,
+    "qwen": 128_000,
+    "glm": 128_000,
+    "yi": 128_000,
+    "moonshot": 128_000,
+    "baichuan": 128_000,
+    "mistral": 128_000,
+    "llama": 128_000,
+}
+
+
+def _resolve_context_limit(model_name: Optional[str] = None) -> int:
+    """Resolve the model's context window limit in tokens.
+
+    Priority:
+    1. SEED_LLM_CONTEXT_SIZE env override
+    2. MINIMAX_CONTEXT_WINDOWS lookup by model name
+    3. _KNOWN_CONTEXT_WINDOWS prefix match
+    4. Fallback: min_tok * 10 (legacy behavior)
+    """
+    override = _ea.pick_nonempty("SEED_LLM_CONTEXT_SIZE")
+    if override:
+        return max(1000, int(override))
+    if model_name:
+        try:
+            from seed.core.llm_exec import MINIMAX_CONTEXT_WINDOWS
+            _mn = str(model_name).strip().lower()
+            # Try exact match first
+            ctx = MINIMAX_CONTEXT_WINDOWS.get(_mn, 0)
+            if ctx <= 0:
+                for _key, _val in MINIMAX_CONTEXT_WINDOWS.items():
+                    if _mn == _key.lower() or _mn.startswith(_key.lower()):
+                        ctx = _val
+                        break
+            if ctx > 0:
+                logger.info("[CTX_LIMIT] model=%s resolved=%s (minimax)", model_name, ctx)
+                return ctx
+            # Try known model prefixes
+            for _prefix, _ctx in _KNOWN_CONTEXT_WINDOWS.items():
+                if _mn.startswith(_prefix):
+                    logger.info("[CTX_LIMIT] model=%s resolved=%s (known=%s)", model_name, _ctx, _prefix)
+                    return _ctx
+            logger.info("[CTX_LIMIT] model=%s not found in any catalog, fallback", model_name)
+        except Exception as e:
+            logger.info("[CTX_LIMIT] lookup failed: %s", e)
+    min_tok = _get_compact_min_tokens()
+    _fallback = min_tok * 10
+    logger.info("[CTX_LIMIT] fallback min_tok=%s context_limit=%s", min_tok, _fallback)
+    return _fallback
+
+
+def estimate_context_usage(
+    messages: List[Dict[str, Any]],
+    model_name: Optional[str] = None,
+) -> Dict[str, int]:
+    """
+    Context size estimate in tokens for UI display.
+    Returns prompt_tokens (estimated or from API) + context_limit.
+    """
+    context_limit = _resolve_context_limit(model_name)
     if not messages:
-        min_bytes = int(_ea.pick_default("90000", *_ea.CONTEXT_COMPACT_MIN_BYTES))
-        return {"body_bytes": 0, "compact_min_bytes": min_bytes, "message_count": 0}
+        return {"prompt_tokens": 0, "context_limit": context_limit, "message_count": 0}
     has_system = messages[0].get("role") == "system"
     body_start = 1 if has_system else 0
-    min_bytes = int(_ea.pick_default("90000", *_ea.CONTEXT_COMPACT_MIN_BYTES))
+    estimated = _estimate_messages_tokens(messages, body_start)
     return {
-        "body_bytes": _messages_body_json_bytes(messages, body_start),
-        "compact_min_bytes": min_bytes,
+        "prompt_tokens": estimated,
+        "context_limit": context_limit,
         "message_count": len(messages),
+        "compact_min_tokens": _get_compact_min_tokens(),
     }
 
 
 def build_context_usage_snapshot(
     messages: List[Dict[str, Any]],
     meta: Optional[Dict[str, Any]] = None,
+    model_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Context bar for Web UI.
+    Context bar for Web UI — all values in tokens.
 
     Prefer the latest API ``usage.prompt_tokens`` (tokens actually sent on the last
-    model call, including tools schema). Fall back to JSON body-byte estimate only
-    when no usage is available yet (between tool output and the next LLM round).
-
-    This is **not** the same as summing ``usage.total_tokens`` across rounds (billing).
+    model call, including tools schema). Fall back to estimated tokens when no usage yet.
     """
-    snap: Dict[str, Any] = dict(estimate_context_usage(messages))
+    snap: Dict[str, Any] = dict(estimate_context_usage(messages, model_name=model_name))
     if not isinstance(meta, dict):
         return snap
     usage = meta.get("usage")
@@ -912,6 +1022,41 @@ def _format_transcript_for_summary(chunks: List[Dict[str, Any]], max_chars: int)
     )
 
 
+
+def _get_compact_summarizer_max_tokens() -> int:
+    """Completion budget for compact summarizer calls (independent of ``SEED_LLM_MAX_TOKENS``)."""
+    raw = _ea.pick_default("4096", *_ea.CONTEXT_COMPACT_SUMMARIZER_MAX_TOKENS)
+    try:
+        return max(256, min(int(raw), 65536))
+    except (TypeError, ValueError):
+        return 4096
+
+
+def _coalesce_llm_visible_text(
+    content: str,
+    meta: Optional[Dict[str, Any]],
+    *,
+    max_chars: int = 12000,
+) -> str:
+    """Prefer assistant content; fall back to reasoning when thinking models emit CoT only."""
+    text = (content or "").strip()
+    if text:
+        return text[:max_chars] if len(text) > max_chars else text
+    if not isinstance(meta, dict):
+        return ""
+    for key in ("reasoning_content", "reasoning"):
+        rc = meta.get(key)
+        if isinstance(rc, str) and rc.strip():
+            text = rc.strip()
+            if len(text) > max_chars:
+                head = max_chars // 2
+                tail = max_chars - head
+                marker = "\n\n...[reasoning truncated for compact summary]...\n\n"
+                text = text[:head] + marker + text[-tail:]
+            return text
+    return ""
+
+
 def _summarizer_llm(fallback: LLMAPIExecutor) -> LLMAPIExecutor:
     """If ``SEED_CONTEXT_COMPACT_SUMMARIZER_*`` (alias ``CODEAGENT_*``) are set, create a
     dedicated summarizer executor; otherwise return the fallback (main LLM).
@@ -921,6 +1066,7 @@ def _summarizer_llm(fallback: LLMAPIExecutor) -> LLMAPIExecutor:
     as an environment variable (e.g. credentials come from a preset)."""
     url = _ea.pick_nonempty(*_ea.CONTEXT_COMPACT_SUMMARIZER_BASEURL)
     mod = _ea.pick_nonempty(*_ea.CONTEXT_COMPACT_SUMMARIZER_MODEL)
+    max_tok = _get_compact_summarizer_max_tokens()
     if url and mod:
         from seed.core.llm_exec import get_llm_executor
 
@@ -929,6 +1075,7 @@ def _summarizer_llm(fallback: LLMAPIExecutor) -> LLMAPIExecutor:
             model=mod,
             api_key=fallback.api_key,
             auth_scheme=fallback.auth_scheme,
+            max_tokens=max_tok,
         )
     return fallback
 
@@ -995,6 +1142,8 @@ logger = logging.getLogger(__name__)
 def maybe_compact_context_messages(
     messages: List[Dict[str, Any]],
     llm: LLMAPIExecutor,
+    *,
+    api_prompt_tokens: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     If enabled and the message tail (excluding system) exceeds a threshold (either
@@ -1005,9 +1154,12 @@ def maybe_compact_context_messages(
     下一轮压缩时检测已有摘要并叠加（而非全量重算）。
     返回压缩信息字典（供调用者写回持久化消息），或 ``None``（未触发压缩）。
 
+    Args:
+        api_prompt_tokens: If provided (from last API response), use this instead
+            of local estimation for the compact trigger check. More accurate.
+
     Env (``CODEAGENT_*`` aliases still honored):
       SEED_CONTEXT_COMPACT=1
-      SEED_CONTEXT_COMPACT_MIN_BYTES      (default 90000) — body JSON byte threshold
       SEED_CONTEXT_COMPACT_MIN_ROUNDS      (default 0, disabled) — user-round trigger
       SEED_CONTEXT_COMPACT_KEEP_USER_ROUNDS (default 3) — full turns to preserve
       SEED_CONTEXT_COMPACT_SUMMARIZER_BASEURL — dedicated summarizer URL (optional)
@@ -1023,42 +1175,48 @@ def maybe_compact_context_messages(
     if body_start and len(messages) < 3:
         return None
 
-    min_bytes = int(_ea.pick_default("90000", *_ea.CONTEXT_COMPACT_MIN_BYTES))
+    min_tokens = _get_compact_min_tokens()
     min_rounds = int(_ea.pick_default("0", *_ea.CONTEXT_COMPACT_MIN_ROUNDS) or 0)
     keep_rounds = int(_ea.pick_default("3", *_ea.CONTEXT_COMPACT_KEEP_USER_ROUNDS))
     max_in = int(_ea.pick_default("120000", *_ea.CONTEXT_SUMMARIZER_MAX_INPUT))
     if keep_rounds < 1:
         return None
 
-    cur_bytes = _messages_body_json_bytes(messages, body_start)
+    # Use API-reported prompt_tokens if available (more accurate than estimation)
+    if api_prompt_tokens is not None and api_prompt_tokens > 0:
+        cur_tokens = api_prompt_tokens
+    else:
+        cur_tokens = _estimate_messages_tokens(messages, body_start)
     try:
         warn_ratio = float(_ea.pick_default("0.85", *_ea.CONTEXT_COMPACT_WARN_RATIO) or 0.85)
     except Exception:
         warn_ratio = 0.85
     warn_ratio = max(0.1, min(warn_ratio, 0.99))
-    if cur_bytes >= int(min_bytes * warn_ratio):
+    if cur_tokens >= int(min_tokens * warn_ratio):
+        _warn_model = getattr(llm, "model", None)
         emit_chat_event(
             {
                 "type": "context_usage",
-                "body_bytes": int(cur_bytes),
-                "compact_min_bytes": int(min_bytes),
+                "prompt_tokens": int(cur_tokens),
+                "compact_min_tokens": int(min_tokens),
+                "context_limit": int(_resolve_context_limit(_warn_model)),
                 "warn_ratio": warn_ratio,
                 "message_count": int(len(messages)),
             }
         )
 
-    # Determine if compaction should trigger: either bytes exceed threshold,
+    # Determine if compaction should trigger: either tokens exceed threshold,
     # or user rounds exceed the round-based threshold.
     body = messages[body_start:]
     user_idx = _user_round_indices(body)
-    exceeds_bytes = cur_bytes >= min_bytes
+    exceeds_tokens = cur_tokens >= min_tokens
     exceeds_rounds = (min_rounds > 0) and (len(user_idx) >= min_rounds)
 
-    if not exceeds_bytes and not exceeds_rounds:
+    if not exceeds_tokens and not exceeds_rounds:
         return None
 
     if len(user_idx) <= keep_rounds:
-        if not exceeds_bytes or len(user_idx) <= 1:
+        if not exceeds_tokens or len(user_idx) <= 1:
             return None
         effective_keep = max(1, len(user_idx) - 1)
     else:
@@ -1130,15 +1288,29 @@ def maybe_compact_context_messages(
         )
     except Exception:
         logger.debug("compact summarizer projection audit failed", exc_info=True)
+    sum_max_tok = _get_compact_summarizer_max_tokens()
     try:
-        summary, _meta = summarizer.generate(sum_messages, tools=None)
+        summary, _meta = summarizer.generate(
+            sum_messages,
+            tools=None,
+            enable_thinking=False,
+            max_tokens=sum_max_tok,
+        )
     except LLMError as e:
         logger.warning("Context compact skipped (summarizer LLM error): %s", e)
         return None
 
-    summary = (summary or "").strip()
+    summary = _coalesce_llm_visible_text(summary or "", _meta)
     if not summary:
-        logger.warning("Context compact skipped (empty summary)")
+        logger.warning(
+            "Context compact skipped (empty summary; cur_tokens=%s min_tokens=%s "
+            "transcript_chars=%s max_tokens=%s model=%s)",
+            cur_tokens,
+            min_tokens,
+            len(transcript),
+            sum_max_tok,
+            getattr(summarizer, "model", "?"),
+        )
         return None
 
     # ── 链式：与旧摘要叠加（如有） ──
@@ -1169,23 +1341,24 @@ def maybe_compact_context_messages(
     )
     sys_msg["content"] = base + block
     messages[:] = [sys_msg] + recent
-    body_bytes_after = _messages_body_json_bytes(messages, body_start)
+    tokens_after = _estimate_messages_tokens(messages, body_start)
     emit_chat_event(
         {
             "type": "context_compact",
             "dropped_messages": int(len(old)),
             "kept_user_rounds": int(effective_keep),
             "summary_chars": int(len(combined)),
-            "compact_min_bytes": int(min_bytes),
-            "body_bytes_before": int(cur_bytes),
-            "body_bytes_after": int(body_bytes_after),
+            "compact_min_tokens": int(min_tokens),
+            "prompt_tokens_before": int(cur_tokens),
+            "prompt_tokens_after": int(tokens_after),
         }
     )
     emit_chat_event(
         {
             "type": "context_usage",
-            "body_bytes": int(body_bytes_after),
-            "compact_min_bytes": int(min_bytes),
+            "prompt_tokens": int(tokens_after),
+            "compact_min_tokens": int(min_tokens),
+            "context_limit": int(_resolve_context_limit(getattr(llm, "model", None))),
             "message_count": int(len(messages)),
             "compacted": True,
         }
@@ -1288,10 +1461,21 @@ def _stream_llm_round(
 def _emit_context_usage_snapshot(
     messages: List[Dict[str, Any]],
     meta: Optional[Dict[str, Any]] = None,
+    model_name: Optional[str] = None,
 ) -> None:
     """Push in-flight context size to Web UI (tool-loop rounds)."""
     try:
-        snap = build_context_usage_snapshot(messages, meta)
+        snap = build_context_usage_snapshot(messages, meta, model_name=model_name)
+        _src = snap.get("source", "estimate")
+        _pt = snap.get("prompt_tokens", 0)
+        _cl = snap.get("context_limit", 0)
+        _mc = snap.get("message_count", 0)
+        _pct = round(_pt / _cl * 100, 1) if _cl else 0
+        logger.info(
+            "[DEBUG_CONTEXT] source=%s prompt_tokens=%s context_limit=%s msg_count=%s pct=%s%%",
+            _src, _pt, _cl, _mc, _pct,
+        )
+        snap["compact_min_tokens"] = _get_compact_min_tokens()
         emit_chat_event({"type": "context_usage", **snap})
     except Exception:
         logger.debug("context_usage snapshot emit failed", exc_info=True)
@@ -1314,6 +1498,7 @@ async def run_llm_tool_loop(
     tools_used: List[str] = []
     tool_trace: List[Dict[str, str]] = []
     loop_meta: Dict[str, Any] = {"rounds": 0, "stopped_reason": None}
+    _model_name: Optional[str] = getattr(llm, "model", None)
 
     oai_tools = registry_to_openai_tools(registry)
     tool_schema = oai_tools if oai_tools else None
@@ -1344,13 +1529,9 @@ async def run_llm_tool_loop(
                     pending = []
                 if pending:
                     messages.extend(pending)
-                    reply = ""
-                    for m in reversed(messages):
-                        if isinstance(m, dict) and m.get("role") == "assistant":
-                            c = m.get("content")
-                            reply = c if isinstance(c, str) else str(c or "")
-                            break
-                    return reply, last_meta, tools_used, tool_trace, loop_meta
+                    # 不直接 return，而是 continue 让下一轮循环重新调用 LLM
+                    # 处理新注入的用户消息，避免 pending 消息被忽略
+                    continue
 
             try:
                 from seed.core.projection_audit import persist_llm_projection_audit
@@ -1386,7 +1567,7 @@ async def run_llm_tool_loop(
             messages.append(assistant_msg)
 
             if not tool_calls:
-                _emit_context_usage_snapshot(messages, last_meta)
+                _emit_context_usage_snapshot(messages, last_meta, model_name=_model_name)
                 if on_round_persist:
                     try:
                         on_round_persist(list(tool_trace), list(tools_used))
@@ -1395,7 +1576,7 @@ async def run_llm_tool_loop(
                 loop_meta["stopped_reason"] = "no_tool_calls"
                 return content, last_meta, tools_used, tool_trace, loop_meta
 
-            _emit_context_usage_snapshot(messages, last_meta)
+            _emit_context_usage_snapshot(messages, last_meta, model_name=_model_name)
 
             for tc in tool_calls:
                 fn = (tc.get("function") or {}) if isinstance(tc, dict) else {}
@@ -1469,7 +1650,7 @@ async def run_llm_tool_loop(
                     except Exception:
                         pass
 
-            _emit_context_usage_snapshot(messages)
+            _emit_context_usage_snapshot(messages, model_name=_model_name)
 
         loop_meta["stopped_reason"] = "max_tool_rounds"
         reply = ""

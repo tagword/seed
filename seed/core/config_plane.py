@@ -189,10 +189,10 @@ def ensure_default_config_files(base: Optional[Path] = None) -> None:
 # SEED_TOOL_SUMMARY_BASEURL=https://api.example.com/v1
 # SEED_TOOL_SUMMARY_MODEL=Qwen/Qwen3.5-14B
 #
-# LLM 摘要压缩（SEED_CONTEXT_COMPACT=1）：在 trim 之后发主模型前触发；按消息体 JSON 字节超阈值则摘要旧轮写入 system。
-# KV 池较小时可略提前触发（降低 MIN_BYTES）、多保留几轮原文（提高 KEEP_USER_ROUNDS）。
+# LLM 摘要压缩（SEED_CONTEXT_COMPACT=1）：在 trim 之后发主模型前触发；按上下文 token 超阈值则摘要旧轮写入 system。
+# KV 池较小时可略提前触发（降低 MIN_TOKENS）、多保留几轮原文（提高 KEEP_USER_ROUNDS）。
 # SEED_CONTEXT_COMPACT=1
-# SEED_CONTEXT_COMPACT_MIN_BYTES=70000
+# SEED_CONTEXT_COMPACT_MIN_TOKENS=30000
 # SEED_CONTEXT_COMPACT_KEEP_USER_ROUNDS=4
 # SEED_CONTEXT_SUMMARIZER_MAX_INPUT=120000
 #

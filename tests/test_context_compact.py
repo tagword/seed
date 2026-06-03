@@ -20,7 +20,7 @@ from seed.core.agent_runtime import (
 def seed_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("SEED_PROJECT_ROOT", str(tmp_path))
     monkeypatch.setenv("SEED_CONTEXT_COMPACT", "1")
-    monkeypatch.setenv("SEED_CONTEXT_COMPACT_MIN_BYTES", "1000")
+    monkeypatch.setenv("SEED_CONTEXT_COMPACT_MIN_TOKENS", "250")
     monkeypatch.setenv("SEED_CONTEXT_COMPACT_KEEP_USER_ROUNDS", "2")
     return tmp_path
 
