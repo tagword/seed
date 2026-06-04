@@ -885,20 +885,85 @@ def delete_stored_session(
     """Remove persisted chat session JSON for this session id.
 
     同时从项目 registry 中注销该会话。
+
+    Bug fix: 当 project_id 为空时，会话可能同时存在于主目录（stub, 298B）
+    和 projects-data/<pid>/sessions/（真实数据）中。此函数会一并清理干净。
     """
-    path = _find_session_file(handle, agent_id, project_id)
-    if path is None:
-        return False
-    try:
-        path.unlink()
-    except OSError:
-        return False
-    # 从 registry 注销
+    from seed.core.proj_reg import list_projects, unregister_session
+
     aid = (agent_id or "").strip() or agent_id_default()
     pid = (project_id or "").strip() if project_id else ""
-    if pid and handle:
-        unregister_session(aid, pid, handle)
-    return True
+    slug = _safe_session_filename(handle)
+    deleted_any = False
+
+    # ── 策略：始终查找并删除所有副本（主目录 + 项目目录） ──
+
+    # 1) 如果指定了 project_id：只删该项目
+    if pid:
+        path = _find_session_file(handle, aid, project_id)
+        if path is not None:
+            try:
+                path.unlink()
+                deleted_any = True
+            except OSError:
+                return False
+            if handle:
+                unregister_session(aid, pid, handle)
+        # 清理 artifacts 和 attachments
+        sess_root = agent_sessions_dir(aid)
+        for subdir in ("_artifacts", "attachments"):
+            target = sess_root / subdir / handle
+            if target.is_dir():
+                try:
+                    shutil.rmtree(target)
+                    deleted_any = True
+                except OSError:
+                    pass
+        return deleted_any
+
+    # 2) 未指定 project_id：遍历 registry 查找会话所属的项目
+    for proj in list_projects(aid):
+        proj_pid = str(proj.get("id") or "").strip()
+        if not proj_pid:
+            continue
+        registered = proj.get("sessions", {})
+        if handle not in registered:
+            continue
+        # 删除项目目录下的真实文件
+        p = _project_sessions_dir(proj_pid, aid) / f"{slug}.json"
+        if p.is_file():
+            try:
+                p.unlink()
+                deleted_any = True
+            except OSError:
+                pass
+        # 注销 registry
+        unregister_session(aid, proj_pid, handle)
+        deleted_any = True
+        break  # 一个会话只属于一个项目
+
+    # 3) 清理主目录的 stub（无论上面是否找到项目）
+    for d in _default_session_search_dirs(aid):
+        stub = d / f"{slug}.json"
+        if stub.is_file():
+            try:
+                stub.unlink()
+                deleted_any = True
+            except OSError:
+                pass
+
+    # 4) 清理关联的 artifacts 和 attachments（使用原始 session_id 作为子目录名）
+    sess_root = agent_sessions_dir(aid)
+    for subdir in ("_artifacts", "attachments"):
+        target = sess_root / subdir / handle
+        if target.is_dir():
+            try:
+                shutil.rmtree(target)
+                deleted_any = True
+            except OSError:
+                pass
+
+    return deleted_any
 
 
 def archive_stored_llm_session(
