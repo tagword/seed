@@ -907,8 +907,10 @@ def delete_stored_session(
                 deleted_any = True
             except OSError:
                 return False
-            if handle:
-                unregister_session(aid, pid, handle)
+        # 即使文件不存在也要清理 registry（孤儿注册清理）
+        if handle:
+            unregister_session(aid, pid, handle)
+            deleted_any = True
         # 清理 artifacts 和 attachments
         sess_root = agent_sessions_dir(aid)
         for subdir in ("_artifacts", "attachments"):
