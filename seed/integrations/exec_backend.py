@@ -101,7 +101,7 @@ def _compute_task_status(meta: dict) -> str:
     return "unknown"
 
 
-def detach_task_status(task_id: str, cwd: Optional[Path] = None) -> str:
+def detach_task_status(task_id: str, cwd: Optional[str] = None) -> str:
     """Return human-readable status of a detached task."""
     work = _resolve_cwd(cwd)
     meta = _load_task_meta(task_id, work)
@@ -122,7 +122,7 @@ def detach_task_status(task_id: str, cwd: Optional[Path] = None) -> str:
 
 
 def detach_task_log(
-    task_id: str, tail: int = 20, cwd: Optional[Path] = None
+    task_id: str, tail: int = 20, cwd: Optional[str] = None
 ) -> str:
     """Return tail of combined log for a detached task."""
     work = _resolve_cwd(cwd)
@@ -143,7 +143,7 @@ def detach_task_log(
         return f"Task {task_id}: error reading log: {e}"
 
 
-def detach_task_stop(task_id: str, cwd: Optional[Path] = None) -> str:
+def detach_task_stop(task_id: str, cwd: Optional[str] = None) -> str:
     """Stop (kill) a detached task."""
     work = _resolve_cwd(cwd)
     meta = _load_task_meta(task_id, work)
@@ -182,7 +182,7 @@ def detach_task_stop(task_id: str, cwd: Optional[Path] = None) -> str:
         return f"Task {task_id}: error stopping: {e}"
 
 
-def detach_task_list(cwd: Optional[Path] = None) -> str:
+def detach_task_list(cwd: Optional[str] = None) -> str:
     """List all tracked detached tasks."""
     work = _resolve_cwd(cwd)
     td = _tasks_dir(work)
