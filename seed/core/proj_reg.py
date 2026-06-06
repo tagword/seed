@@ -104,9 +104,16 @@ def _load_migrated(agent_id: str) -> Dict[str, Any]:
     return data
 
 
-def list_projects(agent_id: str) -> List[Dict[str, Any]]:
+def list_projects(agent_id: str, *, include_virtual: bool = True) -> List[Dict[str, Any]]:
+    """返回 agent 的所有项目列表。
+
+    ``include_virtual``：为 True（默认）时包含虚拟项目 ``__unassigned__``；
+    为 False 时排除，适合 WebUI 项目树展示（虚拟项目由前端逻辑动态插入）。
+    """
     data = _load_migrated(agent_id)
     rows = [r for r in data["projects"] if isinstance(r, dict)]
+    if not include_virtual:
+        rows = [r for r in rows if str(r.get("id") or "").strip() != UNASSIGNED_PROJECT_ID]
     rows.sort(key=lambda r: str(r.get("updated_at") or r.get("created_at") or ""), reverse=True)
     return rows
 
