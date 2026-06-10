@@ -254,11 +254,17 @@ class MCPSseSession:
         self._close_flag = threading.Event()
 
     def _http_client(self) -> Any:
-        """Lazy import httpx and create client."""
+        """Lazy import httpx and create client with custom headers."""
         if self._client is None:
             import httpx
 
-            self._client = httpx.Client(timeout=httpx.Timeout(300.0, connect=30.0))
+            hdrs = {}
+            if self.cfg.headers:
+                hdrs.update(self.cfg.headers)
+            self._client = httpx.Client(
+                timeout=httpx.Timeout(300.0, connect=30.0),
+                headers=hdrs,
+            )
         return self._client
 
     def _parse_sse_event(self, line: str) -> tuple[Optional[str], Optional[str]]:
@@ -319,7 +325,13 @@ class MCPSseSession:
 
     def _handle_sse_event(self, event: str, data: str) -> None:
         if event == "endpoint":
-            self._post_url = data.strip().rstrip("/")
+            raw = data.strip().rstrip("/")
+            # Resolve relative endpoint URL against the SSE base URL
+            if raw.startswith("http://") or raw.startswith("https://"):
+                self._post_url = raw
+            else:
+                from urllib.parse import urljoin
+                self._post_url = urljoin(self._sse_url + "/", raw.lstrip("/"))
             logger.info(
                 "MCP SSE %s: endpoint received -> %s", self.cfg.server_id, self._post_url
             )

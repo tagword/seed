@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +13,8 @@ from seed.core.paths import agent_projects_registry_dir
 # 虚拟项目 ID，用于收纳未关联工作目录的会话
 UNASSIGNED_PROJECT_ID = "__unassigned__"
 UNASSIGNED_PROJECT_NAME = "未分类"
+
+_save_lock = threading.Lock()
 
 
 def _registry_file(agent_id: str) -> Path:
@@ -39,12 +42,13 @@ def _load(agent_id: str) -> Dict[str, Any]:
 
 
 def _save(agent_id: str, data: Dict[str, Any]) -> None:
-    path = _registry_file(agent_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    payload = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
-    tmp.write_text(payload, encoding="utf-8")
-    tmp.replace(path)
+    with _save_lock:
+        path = _registry_file(agent_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        payload = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+        tmp.write_text(payload, encoding="utf-8")
+        tmp.replace(path)
 
 
 def _migrate(data: Dict[str, Any]) -> Dict[str, Any]:

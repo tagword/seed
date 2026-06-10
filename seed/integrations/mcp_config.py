@@ -32,6 +32,7 @@ class MCPServerConfig:
     command: str = ""
     args: list[str] = field(default_factory=list)
     url: str = ""  # SSE endpoint URL (required when transport == "sse")
+    headers: dict[str, str] = field(default_factory=dict)  # custom HTTP headers (SSE)
     env: dict[str, str] = field(default_factory=dict)
     cwd: Optional[str] = None
 
@@ -121,6 +122,7 @@ def server_config_from_dict(server_id: str, entry: Dict[str, Any]) -> MCPServerC
         raise ValueError("server id required")
     args = entry.get("args")
     url = entry.get("url")
+    headers = entry.get("headers")
     env = entry.get("env")
     return MCPServerConfig(
         server_id=sid,
@@ -129,6 +131,7 @@ def server_config_from_dict(server_id: str, entry: Dict[str, Any]) -> MCPServerC
         command=str(entry.get("command") or "").strip(),
         args=[str(x) for x in args] if isinstance(args, list) else [],
         url=str(url).strip() if url else "",
+        headers={str(k): str(v) for k, v in headers.items()} if isinstance(headers, dict) else {},
         env={str(k): str(v) for k, v in env.items()} if isinstance(env, dict) else {},
         cwd=str(entry["cwd"]).strip() if entry.get("cwd") else None,
     )

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,12 +36,16 @@ def _load(agent_id: str, project_id: str) -> Dict[str, Any]:
     return {"items": items}
 
 
+_save_lock = threading.Lock()
+
+
 def _save(agent_id: str, project_id: str, data: Dict[str, Any]) -> None:
-    path = _store_path(agent_id, project_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    with _save_lock:
+        path = _store_path(agent_id, project_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        tmp.replace(path)
 
 
 def list_todos(
