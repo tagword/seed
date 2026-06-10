@@ -16,8 +16,9 @@ MCP_CONFIG_FILENAME = "mcp.json"
 
 _DEFAULT_CONFIG: dict[str, Any] = {
     "_readme": (
-        "MCP servers for Seed/CodeAgent. Each entry under servers: id -> {enabled, transport, command, args, env, cwd}. "
-        "transport must be stdio. Tools: mcp_servers, mcp_list_tools, mcp_call."
+        "MCP servers for Seed/CodeAgent. Each entry under servers: id -> {enabled, transport, command, args, url, env, cwd}. "
+        "transport: stdio (local subprocess) or sse (HTTP SSE remote). "
+        "Tools: mcp_servers, mcp_list_tools, mcp_call."
     ),
     "servers": {},
 }
@@ -30,6 +31,7 @@ class MCPServerConfig:
     transport: str = "stdio"
     command: str = ""
     args: list[str] = field(default_factory=list)
+    url: str = ""  # SSE endpoint URL (required when transport == "sse")
     env: dict[str, str] = field(default_factory=dict)
     cwd: Optional[str] = None
 
@@ -85,6 +87,7 @@ def list_server_configs(base: Optional[Path] = None) -> list[MCPServerConfig]:
         if not sid_s:
             continue
         args = entry.get("args")
+        url = entry.get("url")
         env = entry.get("env")
         out.append(
             MCPServerConfig(
@@ -93,6 +96,7 @@ def list_server_configs(base: Optional[Path] = None) -> list[MCPServerConfig]:
                 transport=str(entry.get("transport") or "stdio").strip().lower(),
                 command=str(entry.get("command") or "").strip(),
                 args=[str(x) for x in args] if isinstance(args, list) else [],
+                url=str(url).strip() if url else "",
                 env={str(k): str(v) for k, v in env.items()} if isinstance(env, dict) else {},
                 cwd=str(entry["cwd"]).strip() if entry.get("cwd") else None,
             )
@@ -116,6 +120,7 @@ def server_config_from_dict(server_id: str, entry: Dict[str, Any]) -> MCPServerC
     if not sid:
         raise ValueError("server id required")
     args = entry.get("args")
+    url = entry.get("url")
     env = entry.get("env")
     return MCPServerConfig(
         server_id=sid,
@@ -123,6 +128,7 @@ def server_config_from_dict(server_id: str, entry: Dict[str, Any]) -> MCPServerC
         transport=str(entry.get("transport") or "stdio").strip().lower() or "stdio",
         command=str(entry.get("command") or "").strip(),
         args=[str(x) for x in args] if isinstance(args, list) else [],
+        url=str(url).strip() if url else "",
         env={str(k): str(v) for k, v in env.items()} if isinstance(env, dict) else {},
         cwd=str(entry["cwd"]).strip() if entry.get("cwd") else None,
     )

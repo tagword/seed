@@ -121,7 +121,7 @@ def register_mcp_tools_into_registry(registry: ToolRegistry) -> int:
     if not mcp_register_enabled():
         return 0
 
-    configs = [c for c in list_server_configs() if c.enabled and c.transport == "stdio"]
+    configs = [c for c in list_server_configs() if c.enabled and c.transport in ("stdio", "sse")]
     if not configs:
         return 0
 
