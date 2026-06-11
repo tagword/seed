@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import json
-import os
+import re
+from collections.abc import Sequence
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import List, Optional
 
 from seed.core.env_access import PROJECT_ROOT, pick_nonempty
-
 
 
 def build_system_prompt(
@@ -14,11 +14,17 @@ def build_system_prompt(
     base: Optional[Path] = None,
     header: str = "The following is your configuration (Markdown). Obey it.",
     filenames: Optional[Sequence[str]] = None,
+    agent_id: Optional[str] = None,
 ) -> str:
     """
     Concatenate config/*.md files that exist. Ensures defaults exist if dir is empty.
 
     ``filenames`` defaults to CONFIG_FILENAMES; the host app may narrow the list via its own plugins manifest.
+
+    When ``agent_id`` is provided (or inferred via ``agent_id_default()``),
+    each persona file is fed through ``render_persona()`` to expand
+    ``$VAR`` / ``${VAR}`` and ``<id>`` placeholders, a path registry table
+    is appended, and skill references are validated.
     """
     root = base if base is not None else project_root()
     cfg = root / "config"
@@ -26,14 +32,15 @@ def build_system_prompt(
     # Load persona markdown from agents/<id>/persona/*.md (default agent),
     # not from global config/*.md.
     persona_dir: Optional[Path] = None
+    resolved_agent_id: str = "default"
     try:
         from seed.core.paths import agent_id_default, agent_persona_dir, ensure_agent_dirs
 
-        aid = agent_id_default()
-        ensure_agent_dirs(aid, base=root)
-        persona_dir = agent_persona_dir(aid, base=root)
+        resolved_agent_id = (agent_id or "").strip() or agent_id_default()
+        ensure_agent_dirs(resolved_agent_id, base=root)
+        persona_dir = agent_persona_dir(resolved_agent_id, base=root)
     except Exception:
-        persona_dir = None
+        pass
     fnames: List[str]
     if filenames is not None:
         fnames = [f for f in filenames if f in CONFIG_FILENAMES]
@@ -41,15 +48,31 @@ def build_system_prompt(
             fnames = list(CONFIG_FILENAMES)
     else:
         fnames = list(CONFIG_FILENAMES)
+
+    # Build variables dict for render_persona
+    vars_dict = _build_seed_vars_dict(resolved_agent_id, root)
+
     parts: List[str] = [header, ""]
     for fname in fnames:
         p = (persona_dir / fname) if persona_dir is not None else (cfg / fname)
         text = _read_if_exists(p)
         if text:
-            parts.append(f"## File: {fname}\n\n{text}\n")
+            # Render: expand variables + <id>
+            rendered = render_persona(text, vars_dict)
+            parts.append(f"## File: {fname}\n\n{rendered}\n")
     for chunk in _plugin_skill_appendices(cfg, root):
         parts.append(chunk)
     body = "\n".join(parts).strip()
+
+    # Skill reference validation
+    if persona_dir is not None:
+        from seed.core.paths import agent_skills_dir
+
+        skills_dir = agent_skills_dir(resolved_agent_id, base=root)
+        body += validate_skill_refs(body, skills_dir)
+
+    # Path registry table
+    body += _path_registry_table(vars_dict)
     if len(parts) <= 2:
         return body
     suffix = (
@@ -312,6 +335,85 @@ CONFIG_FILENAMES: List[str] = [
     "skills.md",
     "user.md",
 ]
+
+
+# ─── render_persona — 变量展开引擎 ─────────────────────────────
+
+
+def render_persona(text: str, vars_dict: dict[str, str]) -> str:
+    """
+    Render persona markdown: expand ``$VAR`` / ``${VAR}`` and ``<id>`` placeholders.
+
+    **Whitelist mode** — only replaces keys present in ``vars_dict``.
+    Unknown ``$VAR`` is left as-is for backward compatibility (no crash on
+    markdown that legitimately uses ``$`` like shell commands or math).
+    """
+    if not text:
+        return text
+
+    # <id> placeholder (used in paths like agents/<id>/skills/)
+    text = text.replace("<id>", vars_dict.get("AGENT_ID", "<id>"))
+
+    if not vars_dict:
+        return text
+
+    def _replace(m: re.Match) -> str:
+        key = m.group(1) or m.group(2) or ""
+        return vars_dict.get(key, m.group(0))
+
+    return re.sub(r'\$(\w+)|\$\{(\w+)\}', _replace, text)
+
+
+def _build_seed_vars_dict(agent_id: str, root: Path) -> dict[str, str]:
+    """Seed-level variable table for ``render_persona``.
+
+    These are variables meaningful to *any* agent built on Seed.
+    Product-specific variables (e.g. ``$PLANS``, ``$DOCS``) belong
+    in the product layer's own vars dict.
+    """
+    from seed.core.paths import agent_home, agent_memory_dir, agent_skills_dir
+
+    return {
+        "AGENT_ID": agent_id,
+        "WORKSPACE": str(root.resolve()),
+        "AGENT_HOME": str(agent_home(agent_id, base=root)),
+        "AGENT_SKILLS": str(agent_skills_dir(agent_id, base=root)),
+        "AGENT_MEMORY": str(agent_memory_dir(agent_id, base=root)),
+    }
+
+
+def _path_registry_table(vars_dict: dict[str, str]) -> str:
+    """Build a Markdown table mapping variable names to absolute paths."""
+    rows: list[str] = [
+        "\n\n## 路径基准（由系统自动注入）\n",
+        "| 变量 | 当前值 |",
+        "|------|--------|",
+    ]
+    for key in sorted(vars_dict):
+        if key == "AGENT_ID":
+            continue
+        rows.append(f"| `${key}` | `{vars_dict[key]}` |")
+    return "\n".join(rows)
+
+
+def validate_skill_refs(text: str, skills_dir: Path) -> str:
+    """Check ``skill `xxx``` references exist in ``skills_dir``.
+
+    Returns a warning comment block for missing skills (non-fatal).
+    """
+    refs = set(re.findall(r'`skill\s+([^\s`]+)`', text))
+    missing: list[str] = []
+    for ref in sorted(refs):
+        skill_file = ref if ref.endswith(".md") else f"{ref}.md"
+        if not (skills_dir / skill_file).is_file():
+            missing.append(ref)
+    if not missing:
+        return ""
+
+    warn = "\n\n<!-- ⚠️ 以下 skill 文件不存在（引用已保留，但请确认路径）-->\n"
+    for ref in missing:
+        warn += f"<!-- ⚠️ skill `{ref}` → `{skills_dir}/{ref}.md` 未找到 -->\n"
+    return warn
 
 
 def project_root() -> Path:
