@@ -1317,6 +1317,9 @@ def maybe_compact_context_messages(
     combined = summary
     if _prior_summary:
         combined = _prior_summary + "\n\n[continued]\n\n" + summary
+    # 记录压缩发生的时间，后续只读不改
+    _compact_ts = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    combined = f"### 📅 摘要生成时间: {_compact_ts}\n\n" + combined
 
     boundary_message = old[-1]
     boundary_source_idx = boundary_message.get("_source_idx")
