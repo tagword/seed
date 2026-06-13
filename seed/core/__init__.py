@@ -2,3 +2,7 @@
 
 __version__ = "1.0.4"
 __description__ = "Seed agent engine"
+
+from seed.core.agent_registry import AgentHandle, AgentRegistry
+
+__all__ = ["AgentHandle", "AgentRegistry"]
