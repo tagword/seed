@@ -1391,6 +1391,7 @@ def _truncate_tool_output(text: str, *, tool_name: str = "tool") -> str:
 
 
 import asyncio
+import contextlib
 import json
 import logging
 import uuid
@@ -1482,6 +1483,37 @@ def _emit_context_usage_snapshot(
         emit_chat_event({"type": "context_usage", **snap})
     except Exception:
         logger.debug("context_usage snapshot emit failed", exc_info=True)
+
+
+async def _execute_tool_with_cancel(
+    executor: ToolExecutor,
+    tool_name: str,
+    args_obj: Dict[str, Any],
+) -> str:
+    """Run one tool, polling cancel so stop requests are not blocked until tool returns."""
+    if is_chat_cancelled():
+        return f"Error executing tool {tool_name!r}: cancelled by user"
+
+    exec_task = asyncio.create_task(
+        executor.execute_with_validation_async(tool_name, args_obj)
+    )
+    try:
+        while not exec_task.done():
+            if is_chat_cancelled():
+                exec_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await exec_task
+                return f"Error executing tool {tool_name!r}: cancelled by user"
+            await asyncio.sleep(0.2)
+        result = await exec_task
+    except asyncio.CancelledError:
+        return f"Error executing tool {tool_name!r}: cancelled by user"
+    except Exception as e:
+        logger.exception("tool %s failed", tool_name)
+        return f"Error executing tool {tool_name!r}: {e}"
+
+    out = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+    return out
 
 
 async def run_llm_tool_loop(
@@ -1582,6 +1614,16 @@ async def run_llm_tool_loop(
             _emit_context_usage_snapshot(messages, last_meta, model_name=_model_name)
 
             for tc in tool_calls:
+                if is_chat_cancelled():
+                    loop_meta["stopped_reason"] = "cancelled"
+                    reply = ""
+                    for m in reversed(messages):
+                        if isinstance(m, dict) and m.get("role") == "assistant":
+                            c = m.get("content")
+                            reply = c if isinstance(c, str) else str(c or "")
+                            break
+                    return reply, last_meta, tools_used, tool_trace, loop_meta
+
                 fn = (tc.get("function") or {}) if isinstance(tc, dict) else {}
                 name = (fn.get("name") or "").strip()
                 raw_args = fn.get("arguments") if isinstance(fn.get("arguments"), str) else "{}"
@@ -1606,11 +1648,13 @@ async def run_llm_tool_loop(
                         args_obj = json.loads(raw_args) if raw_args.strip() else {}
                     except json.JSONDecodeError:
                         args_obj = {}
-                    result = await executor.execute_with_validation_async(name, args_obj)
-                    out = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+                    out = await _execute_tool_with_cancel(executor, name, args_obj)
                 except Exception as e:
                     logger.exception("tool %s failed", name)
                     out = f"Error executing tool {name!r}: {e}"
+
+                if is_chat_cancelled() and "cancelled by user" in out:
+                    loop_meta["stopped_reason"] = "cancelled"
 
                 out = _truncate_tool_output(out, tool_name=name)
 
@@ -1652,6 +1696,15 @@ async def run_llm_tool_loop(
                         on_round_persist(list(tool_trace), list(tools_used))
                     except Exception:
                         pass
+
+                if loop_meta.get("stopped_reason") == "cancelled":
+                    reply = ""
+                    for m in reversed(messages):
+                        if isinstance(m, dict) and m.get("role") == "assistant":
+                            c = m.get("content")
+                            reply = c if isinstance(c, str) else str(c or "")
+                            break
+                    return reply, last_meta, tools_used, tool_trace, loop_meta
 
             _emit_context_usage_snapshot(messages, model_name=_model_name)
 
