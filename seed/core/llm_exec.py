@@ -66,7 +66,7 @@ class LLMAPIExecutor:
 
         if not (self.baseURL or "").strip():
             raise LLMError(
-                "未配置 LLM API 地址：请在 config/seed.env 中设置 SEED_LLM_BASEURL（Code Agent 可在 config 中使用 CODEAGENT_LLM_BASEURL，由产品层 bridge 同步），"
+                "未配置 LLM API 地址：请在 config/env 中设置 SEED_LLM_BASEURL（Code Agent 可在 config 中使用 CODEAGENT_LLM_BASEURL，由产品层 bridge 同步），"
                 "或在 config/seed.models.json（旧文件名 codeagent.models.json）中至少保存一条含 Base URL 与模型的预设"
                 "（未点「设为默认」时将自动使用列表中的第一条）。"
             )
