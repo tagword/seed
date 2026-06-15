@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 
 class SafetyConfig:
-    """Reads safety-related env vars documented in ``config/seed.env.example``."""
+    """Reads safety-related env vars documented in ``config/env.example``."""
 
     @staticmethod
     def redact_secrets_enabled() -> bool:

@@ -1,8 +1,8 @@
 """Optional repo-local env files under ``<project>/config/``.
 
-Loads ``seed.env`` (kernel ``SEED_*``) then ``codeagent.env`` (product ``CODEAGENT_*``).
-If only the legacy ``codeagent.env`` exists, it is still read. Does not override
-keys already present in ``os.environ`` (shell/export wins).
+Loads ``env`` (kernel ``SEED_*``), then ``seed.env`` (legacy), then ``codeagent.env``
+(older legacy). Does not override keys already present in ``os.environ``
+(shell/export wins).
 """
 from __future__ import annotations
 
@@ -12,7 +12,8 @@ from typing import Optional
 
 from seed.core.config_plane import project_root
 
-ENV_FILENAME = "seed.env"
+ENV_FILENAME = "env"
+LEGACY_ENV_FILENAME_SEED = "seed.env"
 LEGACY_ENV_FILENAME = "codeagent.env"
 
 
@@ -50,17 +51,22 @@ def _load_env_file(path: Path) -> None:
 
 def apply_seed_env_from_config(base: Optional[Path] = None) -> None:
     """
-    Load KEY=VALUE lines from ``config/seed.env``, then ``config/codeagent.env``.
+    Load KEY=VALUE lines from ``config/env`` (new name), falling back to
+    ``config/seed.env`` (legacy), then ``config/codeagent.env`` (older legacy).
 
-    When ``seed.env`` is missing, only ``codeagent.env`` is loaded (legacy layout).
     Skips any key already present in ``os.environ`` so the shell/export wins.
     """
     root = project_root() if base is None else base.resolve()
     cfg = root / "config"
-    seed_p = cfg / ENV_FILENAME
+    primary = cfg / ENV_FILENAME
+    old_seed = cfg / LEGACY_ENV_FILENAME_SEED
     leg = cfg / LEGACY_ENV_FILENAME
-    if seed_p.is_file():
-        _load_env_file(seed_p)
+    if primary.is_file():
+        _load_env_file(primary)
+        _load_env_file(old_seed)
+        _load_env_file(leg)
+    elif old_seed.is_file():
+        _load_env_file(old_seed)
         _load_env_file(leg)
     elif leg.is_file():
         _load_env_file(leg)

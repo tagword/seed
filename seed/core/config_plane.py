@@ -132,14 +132,14 @@ def ensure_default_config_files(base: Optional[Path] = None) -> None:
       The kernel only ensures directories via ``seed.core.paths.ensure_agent_dirs`` inside
       ``build_system_prompt``.
     - This function only ensures global runtime config under `<root>/config/`:
-      `seed.env.example`, `seed.cron.json` (from example or embedded default),
+      `env.example`, `seed.cron.json` (from example or embedded default),
       `bootstrap.md`, and plugin-specific prose under `config/skills/`.
     """
     root = project_root() if base is None else base.resolve()
     cfg = root / "config"
     cfg.mkdir(parents=True, exist_ok=True)
     defaults = {
-        "seed.env.example": """# Copy to seed.env (same directory). Existing shell env wins over this file.
+        "env.example": """# Copy to env (same directory). Existing shell env wins over this file.
 #
 # Prefer SEED_* names. CODEAGENT_* with the same suffix is a deprecated alias (still honored).
 # Full canonical list: seed/docs/ENV_REFERENCE.md
@@ -288,7 +288,7 @@ def ensure_default_config_files(base: Optional[Path] = None) -> None:
    - 全局说明位于：`<project_root>/config/*.md`（由本包在需要时生成骨架）
 
 3. **环境变量与 LLM**
-   - 复制模板：`config/seed.env.example` → `config/seed.env`（若仍存在旧的 `config/codeagent.env`，加载逻辑仍会读取）
+   - 复制模板：`config/env.example` → `config/env`（若仍存在旧的 `config/seed.env` 或 `config/codeagent.env`，加载逻辑仍会读取）
    - 填写：`SEED_LLM_BASEURL`、`SEED_LLM_MODEL` 等（兼容 `CODEAGENT_*` 别名）
    - 多模型预设：`config/seed.models.json` 与 `config/seed.default_model`（旧文件名 `seed.models.default.txt` / `codeagent.models*.` 仍可读）
    - 已存在于操作系统环境中的变量优先生效（env 文件不会覆盖）
