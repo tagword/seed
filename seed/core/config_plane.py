@@ -290,7 +290,7 @@ def ensure_default_config_files(base: Optional[Path] = None) -> None:
 3. **环境变量与 LLM**
    - 复制模板：`config/seed.env.example` → `config/seed.env`（若仍存在旧的 `config/codeagent.env`，加载逻辑仍会读取）
    - 填写：`SEED_LLM_BASEURL`、`SEED_LLM_MODEL` 等（兼容 `CODEAGENT_*` 别名）
-   - 多模型预设：`config/seed.models.json` 与 `config/seed.models.default.txt`（旧文件名 `codeagent.models*.` 仍可读）
+   - 多模型预设：`config/seed.models.json` 与 `config/seed.default_model`（旧文件名 `seed.models.default.txt` / `codeagent.models*.` 仍可读）
    - 已存在于操作系统环境中的变量优先生效（env 文件不会覆盖）
 
 4. **宿主应用**

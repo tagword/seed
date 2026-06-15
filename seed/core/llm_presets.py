@@ -16,7 +16,7 @@ Each preset has::
         "max_tokens": 8192
     }
 
-The default preset ID is stored in ``config/seed.models.default.txt`` (legacy filename supported for reads).
+The default preset ID is stored in ``config/seed.default_model`` (legacy filenames ``seed.models.default.txt`` / ``codeagent.models.default.txt`` supported for reads).
 Resolution order for ``resolve_preset(None)``:
 
 1. Preset whose ``id`` matches the stored default (if any).
@@ -39,8 +39,9 @@ logger = logging.getLogger(__name__)
 
 PRESETS_FILENAME = "seed.models.json"
 LEGACY_PRESETS_FILENAME = "codeagent.models.json"
-DEFAULT_ID_FILENAME = "seed.models.default.txt"
-LEGACY_DEFAULT_ID_FILENAME = "codeagent.models.default.txt"
+DEFAULT_ID_FILENAME = "seed.default_model"
+LEGACY_DEFAULT_ID_FILENAME_v1 = "codeagent.models.default.txt"
+LEGACY_DEFAULT_ID_FILENAME_v2 = "seed.models.default.txt"
 
 
 def _config_dir() -> Path:
@@ -67,11 +68,12 @@ def _presets_write_path() -> Path:
 def _default_id_read_path() -> Path:
     cfg = _config_dir()
     seed_p = cfg / DEFAULT_ID_FILENAME
-    leg = cfg / LEGACY_DEFAULT_ID_FILENAME
     if seed_p.is_file():
         return seed_p
-    if leg.is_file():
-        return leg
+    for leg in (LEGACY_DEFAULT_ID_FILENAME_v1, LEGACY_DEFAULT_ID_FILENAME_v2):
+        p = cfg / leg
+        if p.is_file():
+            return p
     return seed_p
 
 
