@@ -50,7 +50,7 @@ Seed 目前是单 Agent 运行时——一个 Agent 对话、调用工具、记�
 
 ## 边界（本版本不做什么）
 
-- ❌ 不做 `seed.team` 独立包（团队工具放 `seed-tools/seed_tools/team_tools.py`）
+- ❌ 不做 `seed.team` 独立包（团队工具放 `seed-tools/seed_tools/team.py`）
 - ❌ 子 Agent 之间无直接交互——所有通信通过负责人 Agent 的 `call_agent`/`dispatch`/`parallel` 路由，不实现子 Agent 间自动发现/调用
 - ❌ 不做 Agent 市场/注册中心
 - ❌ 不做图形化团队管理界面
@@ -98,7 +98,7 @@ call_agent("backend", task)
 配置化判定：
 
 ```python
-# seed-tools/seed_tools/team_tools.py
+# seed-tools/seed_tools/team.py
 class call_agent:
     def __init__(self, available_agents: dict[str, Agent | str]):
         # value = Agent 对象（同进程）或 HTTP URL（跨进程）
@@ -111,8 +111,8 @@ class call_agent:
 ```
 seed-tools/
 └── seed_tools/
-    ├── team_tools.py        ← 新增：CallAgentTool, DispatchTool, ParallelTool
-    ├── hub_tools.py         ← 已有：Agent 间异步通信（备胎方案）
+    ├── team.py              ← 新增：CallAgentTool, DispatchTool, ParallelTool
+    ├── hub.py               ← 已有：Agent 间异步通信（备胎方案）
     └── _registration.py     ← 已有：注册新工具
 
 seed/
@@ -121,14 +121,14 @@ seed/
         └── agent_registry.py    ← 新增：Agent 注册表（管理 Agent 的注册与查找）
 ```
 
-团队工具本质是 **给 LLM 调用的工具**，自然放在 `seed-tools` 包中。`hub_tools.py` 已在那里，团队工具放隔壁 `team_tools.py`，一起引入注册。
+团队工具本质是 **给 LLM 调用的工具**，自然放在 `seed-tools` 包中。`hub.py` 已在那里，团队工具放隔壁 `team.py`，一起引入注册。
 
 ---
 
 ## 五维扫描
 
 - [dev] 技术风险：低。CallAgentTool 本质是工具封装，不涉及 LLM 逻辑改造。跨进程复用现有 `/api/chat` 端点即可。
-- [arch] 模块边界：团队工具放 `seed-tools/seed_tools/team_tools.py`，Agent 注册管理放在 `seed/seed/core/agent_registry.py`。不侵入 TurnLoopEngine 核心。
+- [arch] 模块边界：团队工具放 `seed-tools/seed_tools/team.py`，Agent 注册管理放在 `seed/seed/core/agent_registry.py`。不侵入 TurnLoopEngine 核心。
 - [des] 用户流程：负责人 Agent 的对话体验不变，只是多了新工具。子 Agent 完全无感知。
 - [ops] 部署：单进程开发模式零配置。跨进程需要配置 Agent URL 注册表。
 - [pm] 工期预估：Phase 1（CallAgent + Dispatch + Parallel + 同进程）约 2-3 天；Phase 2（团队记忆 + 复盘）单独排期。
@@ -139,7 +139,7 @@ seed/
 
 | 决策 | 选择 | 理由 |
 |------|------|------|
-| 团队工具放哪 | `seed-tools/seed_tools/team_tools.py` | 复用 seed-tools 现有 tool 体系和注册机制，负责人 Agent 加载工具即可用 |
+| 团队工具放哪 | `seed-tools/seed_tools/team.py` | 复用 seed-tools 现有 tool 体系和注册机制，负责人 Agent 加载工具即可用 |
 | CallAgent 调用方式 | 同进程=函数调用，跨进程=HTTP | 开发阶段零延迟，生产阶段可分布式 |
 | Agent 注册 | `AgentRegistry` 单例 | 简单、够用、易切换 |
 | 负责人 vs 成员 | 同一 Agent 类 | 避免过早抽象，保持灵活 |

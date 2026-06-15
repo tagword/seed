@@ -1,6 +1,5 @@
-"""Integrations: browser, safety bridge, webhooks, messaging — depend on ``seed.core``."""
+"""Integrations: safety bridge, webhooks, messaging — depend on ``seed.core``."""
 
-from seed.integrations.browser import BROWSER, ensure_browser_running, BrowserError
 from seed.integrations.safety import (
     check_bash_command,
     enforce_bash_timeout,
@@ -19,9 +18,6 @@ from seed.integrations.webhook_dedup import (
 from seed.integrations.message_api import to_openai_chat_payload
 from seed.integrations.session_title import llm_generate_display_title, maybe_llm_refresh_session_title
 __all__ = (
-    "BROWSER",
-    "ensure_browser_running",
-    "BrowserError",
     "check_bash_command",
     "enforce_bash_timeout",
     "sanitize_assistant_output",

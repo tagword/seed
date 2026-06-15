@@ -62,7 +62,7 @@ def test_bytes_forced_compact_with_two_user_rounds(seed_home: Path) -> None:
     for i in range(2):
         full.append({"role": "user", "content": f"user-{i}"})
         full.append({"role": "assistant", "content": "x" * 1200})
-        full.append({"role": "tool", "name": "bash_exec", "content": "y" * 1200})
+        full.append({"role": "tool", "name": "bash", "content": "y" * 1200})
 
     api = build_api_projection_messages(full, max_user_rounds=12)
     result = maybe_compact_context_messages(api, _llm("forced summary"))

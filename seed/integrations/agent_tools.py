@@ -65,7 +65,7 @@ _INNATE_DENY_PREFIXES: tuple[str, ...] = ("mcp__",)
 _INNATE_DENY_NAMES: set[str] = {
     "file_write",
     "file_edit",
-    "bash_exec",
+    "bash",
     "bash_tool",
     "notebook_edit_tool",
     "seed_cron_apply",

@@ -63,7 +63,6 @@ def cmd_check():
         "seed.core.turn_loop",
         "seed.core.sess_store",
         "seed.integrations",
-        "seed.integrations.browser",
         "seed.integrations.safety",
         "seed.integrations.webhook_dedup",
         "seed.models",

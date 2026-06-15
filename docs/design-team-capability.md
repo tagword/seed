@@ -50,7 +50,7 @@ handle.run_task(task: str) -> str  # 内部自动路由
 
 ### 2. CallAgentTool — 一对一同步调用
 
-**位置**：`seed-tools/seed_tools/team_tools.py`
+**位置**：`seed-tools/seed_tools/team.py`
 
 ```python
 # Tool 定义
@@ -176,8 +176,8 @@ async def parallel(tasks: list[dict]) -> str:
 ```
 seed-tools/
 └── seed_tools/
-    ├── team_tools.py          ← 新增：call_agent, dispatch, parallel
-    ├── hub_tools.py           ← 已有：hub_send（异步通信备胎）
+    ├── team.py                ← 新增：call_agent, dispatch, parallel
+    ├── hub.py                 ← 已有：hub_send（异步通信备胎）
     └── _registration.py       ← 修改：注册三个新工具
 ```
 
@@ -197,7 +197,7 @@ seed/
 
 ```python
 # 在 _registration.py 顶部新增导入
-from seed_tools.team_tools import (
+from seed_tools.team import (
     call_agent, call_agent_tool_def,
     dispatch, dispatch_tool_def,
     parallel, parallel_tool_def,
@@ -256,7 +256,7 @@ registry.register(parallel_tool_def, parallel)
 ### ✅ 2. 依赖检查
 **结果：通过**
 - `seed-tools/pyproject.toml` 已依赖 `seed`（无需新增）
-- `httpx` 已在 `hub_tools.py` 中使用并可用（v0.28.1 ✅）
+- `httpx` 已在 `hub.py` 中使用并可用（v0.28.1 ✅）
 - `asyncio` 标准库，无新增依赖
 - Phase 1 仅同进程，无需 HTTP 客户端
 
@@ -287,7 +287,7 @@ registry.register(parallel_tool_def, parallel)
 ### ✅ 7. 五维再检
 | 维度 | 结果 |
 |------|------|
-| [dev] | 3 个文件改动（`team_tools.py` + `agent_registry.py` + `_registration.py`），代码量 < 200 行 |
+| [dev] | 3 个文件改动（`team.py` + `agent_registry.py` + `_registration.py`），代码量 < 200 行 |
 | [arch] | 模块边界清晰：工具在 seed-tools，注册表在 seed core，不侵入 TurnLoopEngine 核心循环  |
 | [des] | LLM 调用工具后的结果统一为文本字符串，LLM 可直接理解 |
 | [ops] | 无新增配置/部署步骤 |

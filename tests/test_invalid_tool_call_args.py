@@ -35,7 +35,7 @@ def test_extract_tool_calls_drops_partial_json_arguments() -> None:
             {
                 "id": "call_b",
                 "type": "function",
-                "function": {"name": "bash_exec", "arguments": '{"command": "ls'},
+                "function": {"name": "bash", "arguments": '{"command": "ls'},
             }
         ]
     }

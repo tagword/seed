@@ -87,7 +87,7 @@ def build_system_prompt(
         "前一次的结果读完再决定下一步。\n"
         "- 涉及写、启动、杀进程、发网络请求、改配置的工具**绝不并行**，且调用前需基于上文确认"
         "当前真实状态（不要依赖上一轮的快照）。\n"
-        "- 长驻进程（服务器/监视器）请通过 `bash_exec(detach=true)` 启动，不要用前台 "
+        "- 长驻进程（服务器/监视器）请通过 `bash(detach=true)` 启动，不要用前台 "
         "`cd X && npx serve ...` —— 前台命令会超时并留下僵尸进程。\n"
         "- **Command Safety**: 禁止执行修改系统关键文件（/etc, /boot, /dev）、格式化磁盘、"
         "或下载并执行远程脚本的命令。若任务确实需要此类操作，请向用户解释原因并请求手动确认。\n"
@@ -238,7 +238,7 @@ def ensure_default_config_files(base: Optional[Path] = None) -> None:
 # memory_search 默认跳过已过期的 experience（与 episodic 注入一致）；若要搜过期项：
 # SEED_MEMORY_SEARCH_INCLUDE_EXPIRED=1
 #
-# 编程向自检：内置工具 workspace_verify（也可用 bash_exec）；默认命令来自：
+# 编程向自检：内置工具 workspace_verify（也可用 bash）；默认命令来自：
 # SEED_WORKSPACE_VERIFY_CMD=pytest -q
 # SEED_WORKSPACE_VERIFY_TIMEOUT=300
 #

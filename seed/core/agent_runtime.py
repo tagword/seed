@@ -28,8 +28,7 @@ _COMPACT_BLOCK = re.compile(
 # instead of naively replaying "please continue".
 _FAILURE_DOMAIN_PREFIXES: Tuple[str, ...] = (
     "browser_",
-    "bash_exec",
-    "bash_tool",
+    "bash",
     "file_",
     "web_",
 )
@@ -1146,9 +1145,9 @@ def maybe_compact_context_messages(
     api_prompt_tokens: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
     """
-    If enabled and the message tail (excluding system) exceeds a threshold (either
-    ``MIN_BYTES`` or ``MIN_ROUNDS``), summarize older turns into the system prompt and
-    drop older raw messages — keeps the last ``KEEP_USER_ROUNDS`` (default 3) verbatim.
+    If enabled and the message tail (excluding system) exceeds a token threshold,
+    summarize older turns into the system prompt and drop older raw messages —
+    keeps the last ``KEEP_USER_ROUNDS`` (default 3) verbatim.
 
     **链式摘要**：将压缩结果写入 ``old[-1][\"_compact_summary\"]``（边界消息），
     下一轮压缩时检测已有摘要并叠加（而非全量重算）。
@@ -1160,7 +1159,6 @@ def maybe_compact_context_messages(
 
     Env (``CODEAGENT_*`` aliases still honored):
       SEED_CONTEXT_COMPACT=1
-      SEED_CONTEXT_COMPACT_MIN_ROUNDS      (default 0, disabled) — user-round trigger
       SEED_CONTEXT_COMPACT_KEEP_USER_ROUNDS (default 3) — full turns to preserve
       SEED_CONTEXT_COMPACT_SUMMARIZER_BASEURL — dedicated summarizer URL (optional)
       SEED_CONTEXT_COMPACT_SUMMARIZER_MODEL   — dedicated summarizer model (optional)
@@ -1176,7 +1174,6 @@ def maybe_compact_context_messages(
         return None
 
     min_tokens = _get_compact_min_tokens()
-    min_rounds = int(_ea.pick_default("0", *_ea.CONTEXT_COMPACT_MIN_ROUNDS) or 0)
     keep_rounds = int(_ea.pick_default("3", *_ea.CONTEXT_COMPACT_KEEP_USER_ROUNDS))
     max_in = int(_ea.pick_default("120000", *_ea.CONTEXT_SUMMARIZER_MAX_INPUT))
     if keep_rounds < 1:
@@ -1205,14 +1202,10 @@ def maybe_compact_context_messages(
             }
         )
 
-    # Determine if compaction should trigger: either tokens exceed threshold,
-    # or user rounds exceed the round-based threshold.
     body = messages[body_start:]
     user_idx = _user_round_indices(body)
-    exceeds_tokens = cur_tokens >= min_tokens
-    exceeds_rounds = (min_rounds > 0) and (len(user_idx) >= min_rounds)
 
-    if not exceeds_tokens and not exceeds_rounds:
+    if cur_tokens < min_tokens:
         return None
 
     if len(user_idx) <= keep_rounds:

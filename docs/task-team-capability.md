@@ -19,7 +19,7 @@
 **验收条件**: `call_agent`、`dispatch`（sequential/parallel）、`parallel` 三个工具注册生效，handler 能从 AgentRegistry 获取 handle 并调用
 
 任务:
-- [W2.1] 创建 `seed-tools/seed_tools/team_tools.py`：三个工具定义 + handler
+- [W2.1] 创建 `seed-tools/seed_tools/team.py`：三个工具定义 + handler
 - [W2.2] 更新 `seed-tools/seed_tools/_registration.py`：导入并注册三个新工具
 
 ## Wave 3: 集成验证

@@ -10,6 +10,7 @@ dependencies = [
     "requests>=2.28.0",
     "ddgs>=9.14.0",
     "apscheduler>=3.10.0",
+    "seed-model-providers>=1.0.0",
 ]
 
 [project.optional-dependencies]

@@ -45,11 +45,8 @@ from seed.core.sess_store import SessionManager, SessionNotFoundError, SessionSt
 from seed.core.tool_runtime import ToolExecutionError, ToolExecutor, ToolRegistry as SeedToolRegistry
 from seed.core.turn_loop import AutonomousAgent, TurnLoopConfig, TurnLoopEngine
 from seed.integrations import (
-    BROWSER,
-    BrowserError,
     compute_webhook_dedup_key,
     dedup_enabled,
-    ensure_browser_running,
     llm_generate_display_title,
     maybe_llm_refresh_session_title,
     reset_webhook_dedup_cache,

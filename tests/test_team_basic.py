@@ -146,14 +146,14 @@ class TestCallAgent:
 
     @pytest.mark.asyncio
     async def test_call_agent_success(self, registered_agents):
-        from seed_tools.team_tools import call_agent
+        from seed_tools.team import call_agent
 
         result = await call_agent("backend", "implement login API")
         assert result == "backend-ok: implement login API"
 
     @pytest.mark.asyncio
     async def test_call_agent_not_found(self, registered_agents):
-        from seed_tools.team_tools import call_agent
+        from seed_tools.team import call_agent
 
         result = await call_agent("nonexistent", "any task")
         assert "Error" in result
@@ -165,7 +165,7 @@ class TestDispatch:
 
     @pytest.mark.asyncio
     async def test_dispatch_sequential(self, registered_agents):
-        from seed_tools.team_tools import dispatch
+        from seed_tools.team import dispatch
 
         tasks = [
             {"agent_id": "backend", "task": "build API"},
@@ -182,7 +182,7 @@ class TestDispatch:
 
     @pytest.mark.asyncio
     async def test_dispatch_parallel(self, registered_agents):
-        from seed_tools.team_tools import dispatch
+        from seed_tools.team import dispatch
 
         tasks = [
             {"agent_id": "backend", "task": "build API"},
@@ -203,14 +203,14 @@ class TestDispatch:
 
     @pytest.mark.asyncio
     async def test_dispatch_empty(self, registered_agents):
-        from seed_tools.team_tools import dispatch
+        from seed_tools.team import dispatch
 
         raw = await dispatch([], mode="sequential")
         assert json.loads(raw) == []
 
     @pytest.mark.asyncio
     async def test_dispatch_stop_on_first_error(self, registered_agents):
-        from seed_tools.team_tools import dispatch
+        from seed_tools.team import dispatch
 
         tasks = [
             {"agent_id": "backend", "task": "ok"},
@@ -226,7 +226,7 @@ class TestDispatch:
 
     @pytest.mark.asyncio
     async def test_dispatch_unknown_mode(self, registered_agents):
-        from seed_tools.team_tools import dispatch
+        from seed_tools.team import dispatch
 
         raw = await dispatch([{"agent_id": "backend", "task": "x"}], mode="invalid")
         result = json.loads(raw)
@@ -236,7 +236,7 @@ class TestDispatch:
 class TestParallel:
     @pytest.mark.asyncio
     async def test_parallel_shortcut(self, registered_agents):
-        from seed_tools.team_tools import parallel
+        from seed_tools.team import parallel
 
         tasks = [
             {"agent_id": "backend", "task": "task 1"},
