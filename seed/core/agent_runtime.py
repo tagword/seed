@@ -838,11 +838,11 @@ def _context_compact_enabled() -> bool:
 def _estimate_messages_tokens(messages: List[Dict[str, Any]], body_start: int) -> int:
     """Estimate token count for messages body.
 
-    Uses DeepSeek tokenizer (via codeagent.core.token_counter) when available,
+    Uses DeepSeek tokenizer (via seed_model_providers.token_counter) when available,
     falls back to simple heuristic. Includes ~1500 token overhead for tool schemas.
     """
     try:
-        from codeagent.core.token_counter import count_messages as _cnt_msgs
+        from seed_model_providers.token_counter import count_messages as _cnt_msgs
         body = messages[body_start:]
         # count_messages includes the remaining messages + schema overhead
         counted = _cnt_msgs(body)
@@ -854,7 +854,7 @@ def _estimate_messages_tokens(messages: List[Dict[str, Any]], body_start: int) -
         pass
     try:
         from seed.core.llm_exec import msg_text_to_str as _mts
-        from codeagent.core.token_counter import count_tokens as _cnt_tok
+        from seed_model_providers.token_counter import count_tokens as _cnt_tok
         total = 0
         for m in messages[body_start:]:
             content = m.get("content")
