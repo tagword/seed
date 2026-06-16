@@ -11,11 +11,10 @@ dependencies = [
     "seed-model-providers>=1.0.0",
     "ddgs>=9.14.0",
     "apscheduler>=3.10.0",
-    "seed-model-providers>=1.0.0",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "ruff>=0.4.0", "bandit>=1.7.0"]
+dev = ["pytest>=7.0", "pytest-asyncio>=0.23.0", "ruff>=0.4.0", "bandit>=1.7.0"]
 
 [project.scripts]
 seed = "seed.cli:main"
@@ -33,6 +32,10 @@ minversion = "7.0"
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-v --tb=short"
+asyncio_mode = "auto"
+markers = [
+    "asyncio: mark a test as asyncio-driven (handled by pytest-asyncio)",
+]
 
 [tool.ruff]
 line-length = 120

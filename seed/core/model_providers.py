@@ -12,6 +12,21 @@ New code should import directly from ``seed_model_providers``.
 """
 
 # flake8: noqa: F401, F403
+import sys
+from pathlib import Path
+
+try:
+    import seed_model_providers as _smp  # type: ignore[import-untyped, unused-ignore] # noqa: F401
+except ModuleNotFoundError:
+    # Monorepo/dev fallback: allow importing from sibling checkout without
+    # requiring `pip install seed-model-providers` first.
+    _repo_root = Path(__file__).resolve().parents[3]
+    _smp_root = _repo_root / "seed-model-providers"
+    if _smp_root.is_dir():
+        _smp_root_str = str(_smp_root)
+        if _smp_root_str not in sys.path:
+            sys.path.insert(0, _smp_root_str)
+
 from seed_model_providers import (  # type: ignore[import-untyped, unused-ignore]
     PROVIDER_CATALOG,
     USE_TYPE_LABELS,

@@ -101,6 +101,20 @@ import requests
 logger = logging.getLogger(__name__)
 
 
+def _requests_proxies_for(url: str):
+    """Disable proxying for local LLM endpoints (Ollama / SGLang / etc.).
+
+    A system/env proxy cannot reach loopback addresses, so requests to a local
+    base URL must bypass it. Remote endpoints keep the default proxy behaviour.
+    """
+    try:
+        from seed_model_providers import requests_proxies_for
+
+        return requests_proxies_for(url)
+    except Exception:
+        return None
+
+
 def generate(
     self,
     messages: List[Dict[str, Any]],
@@ -135,7 +149,7 @@ def generate(
         "model": self.model,
         "messages": copy.deepcopy(api_messages),
         "max_tokens": eff_max,
-        "temperature": temperature or self.temperature,
+        "temperature": self.temperature if temperature is None else temperature,
         "top_p": self.topP,
     }
     if not _ea.any_nonempty(*_ea.LLM_NO_TOPK):
@@ -263,11 +277,13 @@ def generate(
         )
 
     try:
+        _url = self._get_completion_url()
         response = requests.post(
-            self._get_completion_url(),
+            _url,
             headers=self.headers,
             json=params,
-            timeout=120
+            timeout=120,
+            proxies=_requests_proxies_for(_url),
         )
         if not response.ok:
             snippet = (response.text or "")[:2000]
@@ -279,7 +295,6 @@ def generate(
             data = _parse_minimax_anthropic_response(raw)
         else:
             data = response.json()
-        data = response.json()
 
         choices = data.get("choices") or []
         if not choices:
@@ -301,7 +316,7 @@ def generate(
         # reasoning_split 时，思考会内联在 `content` 中，被 <think>...</think>
         # 标签包裹；下面一并剥离。
         reasoning_details_text = _extract_reasoning_details_text(msg.get("reasoning_details"))
-        inline_think_text, stripped_content = _strip_think_tags(content)
+        stripped_content, inline_think_text = _strip_think_tags(content)
         if stripped_content != content:
             content = stripped_content
             if inline_think_text and not reasoning_details_text:
@@ -411,7 +426,7 @@ def generate_stream(
         "model": self.model,
         "messages": copy.deepcopy(api_messages),
         "max_tokens": eff_max,
-        "temperature": temperature or self.temperature,
+        "temperature": self.temperature if temperature is None else temperature,
         "top_p": self.topP,
         "stream": True,
     }
@@ -463,12 +478,14 @@ def generate_stream(
 
     resp = None
     try:
+        _url = self._get_completion_url()
         resp = requests.post(
-            self._get_completion_url(),
+            _url,
             headers=self.headers,
             json=params,
             stream=True,
             timeout=120,
+            proxies=_requests_proxies_for(_url),
         )
         if not resp.ok:
             snippet = (resp.text or "")[:2000]
@@ -714,68 +731,6 @@ def _openai_chat_messages(
             else:
                 out_parts.append(p)
         return out_parts if changed else content
-
-    def _normalize_minimax_multimodal(content: Any) -> Any:
-        """Normalize MiniMax Responses-style multimodal blocks → OpenAI style.
-
-        MiniMax-M3 has two API surfaces:
-          - ``/v1/responses``  uses ``input_text`` / ``input_image`` / ``input_video``
-          - ``/v1/chat/completions`` uses ``text`` / ``image_url`` / ``video_url``
-
-        When a caller mixes schemas (e.g. agent code wrote Responses-style blocks
-        but the preset routes through chat/completions), we rewrite the
-        ``type`` so the OpenAI-compatible endpoint accepts the payload.
-        """
-        if not isinstance(content, list):
-            return content
-        out_parts: List[Dict[str, Any]] = []
-        changed = False
-        for p in content:
-            if not isinstance(p, dict):
-                out_parts.append(p)
-                continue
-            ptype = p.get("type")
-            if ptype == "input_text" and isinstance(p.get("text"), str):
-                out_parts.append({"type": "text", "text": p["text"]})
-                changed = True
-            elif ptype == "output_text" and isinstance(p.get("text"), str):
-                out_parts.append({"type": "text", "text": p["text"]})
-                changed = True
-            elif ptype == "input_image":
-                src = p.get("image_url") or p.get("image")
-                url = src.get("url") if isinstance(src, dict) else (src if isinstance(src, str) else None)
-                detail = src.get("detail") if isinstance(src, dict) else None
-                block: Dict[str, Any] = {"type": "image_url", "image_url": {"url": url or ""}}
-                if detail:
-                    block["image_url"]["detail"] = detail
-                out_parts.append(block)
-                changed = True
-            elif ptype == "input_video":
-                src = p.get("video_url") or p.get("video")
-                url = src.get("url") if isinstance(src, dict) else (src if isinstance(src, str) else None)
-                fps = src.get("fps") if isinstance(src, dict) else None
-                vblock: Dict[str, Any] = {"type": "video_url", "video_url": {"url": url or ""}}
-                if fps is not None:
-                    vblock["video_url"]["fps"] = fps
-                out_parts.append(vblock)
-                changed = True
-            else:
-                out_parts.append(p)
-        return out_parts if changed else content
-        """
-        DeepSeek thinking-mode contract: assistant `reasoning_content` must be
-        echoed on every subsequent request (often including non-tool replies),
-        otherwise the API returns HTTP 400. Tool-call chains remain the strictest
-        case; plain multi-turn chat in thinking mode also requires the field.
-
-        Some strict OpenAI-compatible gateways reject unknown keys, so this is
-        gated behind an env flag, with a safe auto-enable for DeepSeek's
-        official endpoint.
-        """
-        from seed.core.model_providers import resolve_chat_protocol, should_send_reasoning_content
-
-        proto = chat_protocol or resolve_chat_protocol(provider="", base_url=base_url or "")
-        return should_send_reasoning_content(chat_protocol=proto, base_url=base_url or "")
 
     include_rc = _should_send_reasoning_content()
     from seed.core.model_providers import resolve_chat_protocol, uses_full_reasoning_content_echo
@@ -1226,7 +1181,7 @@ def _minimax_input_tokens_url(base_url: str) -> str:
 def _to_minimax_responses_input(
     messages: List[Dict[str, Any]],
     tools: Optional[List[Dict[str, Any]]] = None,
-) -> List[Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Convert OpenAI-style chat messages to MiniMax Responses API ``input`` items.
 
     Only the fields the input-tokens endpoint needs are populated; the endpoint
@@ -1255,8 +1210,8 @@ def _to_minimax_responses_input(
             out.append({"type": "message", "role": role, "content": parts})
         else:
             out.append({"type": "message", "role": role, "content": str(content or "")})
+    out_tools: List[Dict[str, Any]] = []
     if tools:
-        out_tools: List[Dict[str, Any]] = []
         for t in tools:
             if not isinstance(t, dict):
                 continue
@@ -1271,9 +1226,7 @@ def _to_minimax_responses_input(
                     "parameters": fn.get("parameters") or {"type": "object", "properties": {}},
                 }
             )
-        if out_tools:
-            return out, out_tools
-    return out
+    return out, out_tools
 
 
 def estimate_minimax_tokens(
@@ -1294,7 +1247,7 @@ def estimate_minimax_tokens(
     """
     if not api_key:
         raise LLMError("MiniMax input_tokens estimate requires an API key")
-    input_items, out_tools = _to_minimax_responses_input(messages, tools)  # type: ignore[misc]
+    input_items, out_tools = _to_minimax_responses_input(messages, tools)
     payload: Dict[str, Any] = {"model": model, "input": input_items}
     if out_tools:
         payload["tools"] = out_tools

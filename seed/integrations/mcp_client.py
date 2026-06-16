@@ -261,9 +261,18 @@ class MCPSseSession:
             hdrs = {}
             if self.cfg.headers:
                 hdrs.update(self.cfg.headers)
+            # Bypass any system/env proxy for loopback MCP servers; a proxy
+            # cannot reach 127.0.0.1 and would otherwise fail the connection.
+            try:
+                from seed_model_providers import httpx_trust_env_for
+
+                trust_env = httpx_trust_env_for(self._sse_url)
+            except Exception:
+                trust_env = True
             self._client = httpx.Client(
                 timeout=httpx.Timeout(300.0, connect=30.0),
                 headers=hdrs,
+                trust_env=trust_env,
             )
         return self._client
 

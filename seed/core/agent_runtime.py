@@ -750,6 +750,14 @@ def build_api_projection_messages(
 
     if skills_suffix and api and api[0].get("role") == "system":
         api[0]["content"] = str(api[0].get("content") or "").rstrip() + skills_suffix
+    # Hard cap on conversation history by user-rounds (opt-in via
+    # SEED_CHAT_USER_ROUNDS; 0 = disabled). Bounds prompt growth even when the
+    # API-token-driven compaction is unavailable (CLI / task / cron paths).
+    # Trimming happens on a user-message boundary; orphan tool_calls/results
+    # left behind are removed by the cleaning passes below.
+    _max_user_rounds = _ea.pick_int(0, *_ea.CHAT_USER_ROUNDS)
+    if _max_user_rounds > 0:
+        api = trim_messages_by_user_rounds(api, _max_user_rounds)
     # Drop tool_calls with invalid JSON arguments first (historical self-heal
     # for sessions saved before llm_exec started validating them), then remove
     # assistant turns that became empty as a result, then clean orphans.

@@ -124,3 +124,32 @@ def test_strip_ephemeral_message_fields(seed_home: Path) -> None:
     strip_ephemeral_message_fields(msgs)
     assert "_source_idx" not in msgs[0]
     assert "_auto_continue_nudge" not in msgs[0]
+
+
+def _multi_round_session(n_rounds: int) -> list[dict]:
+    full = [{"role": "system", "content": "sys"}]
+    for i in range(n_rounds):
+        full.append({"role": "user", "content": f"u{i}"})
+        full.append({"role": "assistant", "content": f"a{i}"})
+    return full
+
+
+def test_chat_user_rounds_disabled_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SEED_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.delenv("SEED_CHAT_USER_ROUNDS", raising=False)
+    full = _multi_round_session(10)
+    api = build_api_projection_messages(full)
+    # No trimming: system + 10 user + 10 assistant
+    assert sum(1 for m in api if m.get("role") == "user") == 10
+
+
+def test_chat_user_rounds_trims_when_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SEED_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("SEED_CHAT_USER_ROUNDS", "3")
+    full = _multi_round_session(10)
+    api = build_api_projection_messages(full)
+    # system preserved, only last 3 user rounds kept
+    assert api[0]["role"] == "system"
+    assert sum(1 for m in api if m.get("role") == "user") == 3
+    user_contents = [m["content"] for m in api if m.get("role") == "user"]
+    assert user_contents == ["u7", "u8", "u9"]
