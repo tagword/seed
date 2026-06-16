@@ -76,7 +76,8 @@ def test_bytes_forced_compact_with_two_user_rounds(seed_home: Path) -> None:
     assert "forced summary" in full[3]["_compact_summary"]
 
 
-def test_auto_continue_nudge_not_counted_as_user_round(seed_home: Path) -> None:
+def test_auto_continue_nudge_counted_as_user_round_in_compress(seed_home: Path) -> None:
+    """Nudge 计入轮次，让分块渐进压缩能按 chunk 边界切分。"""
     full = [
         {"role": "system", "content": "sys"},
         {"role": "user", "content": "real-1"},
@@ -95,7 +96,12 @@ def test_auto_continue_nudge_not_counted_as_user_round(seed_home: Path) -> None:
     api = build_api_projection_messages(full)
     result = maybe_compact_context_messages(api, _llm("summary"))
     assert result is not None
+    # user_idx（含 nudge）= [0,2,4,6], keep_rounds=3 → cut=user_idx[1]=2
+    # boundary = body[1] = full[2] (assistant a1), _source_idx=2
     assert result["boundary_source_idx"] == 4
+    # 注解：keep_rounds=2，user_idx（含 nudge）=[0,2,4,6]
+    # effective_keep=2, cut=user_idx[2]=4, boundary=body[3]→_source_idx=4
+    # 结果与旧行为（不计 nudge）相同，因为 4 个轮次 cut 后到第 2 个 real user。
 
 
 def test_merge_llm_tail_skips_auto_continue_nudge(seed_home: Path) -> None:

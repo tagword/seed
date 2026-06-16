@@ -809,7 +809,12 @@ def trim_messages_by_user_rounds(
     has_system = bool(messages and messages[0].get("role") == "system")
     body_start = 1 if has_system else 0
     body = messages[body_start:]
-    user_idx = _user_round_indices(body)
+    # 包括所有 role=user 的消息作为轮次边界（含 _auto_continue_nudge），
+    # 让自主模式的分块渐进压缩能按 chunk 边界切分。
+    user_idx = [
+        i for i, m in enumerate(body)
+        if isinstance(m, dict) and m.get("role") == "user"
+    ]
     if len(user_idx) <= max_user_rounds:
         return messages
     cut = user_idx[len(user_idx) - max_user_rounds]
@@ -1201,7 +1206,12 @@ def maybe_compact_context_messages(
         )
 
     body = messages[body_start:]
-    user_idx = _user_round_indices(body)
+    # 包括所有 role=user 的消息作为轮次边界（含 _auto_continue_nudge），
+    # 让自主模式的分块渐进压缩能按 chunk 边界切分。
+    user_idx = [
+        i for i, m in enumerate(body)
+        if isinstance(m, dict) and m.get("role") == "user"
+    ]
 
     if cur_tokens < min_tokens:
         return None

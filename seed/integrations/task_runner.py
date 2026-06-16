@@ -137,35 +137,84 @@ async def run_agent_task(ctx: RunContext) -> TaskResult:
         set_active_project_episodic(False)
         clear_active_project_workspace()
 
+    # ── 分块渐进压缩 ──
+    # 把 run_llm_tool_loop 拆成多个小段（SEED_MAX_TOOL_ROUNDS_PER_CHUNK 轮），
+    # 每段结束后合并回 full_messages → 压缩 → 重建 projection → 继续下一段。
+    # 这样自主开发模式下（长时间无新用户消息），上下文窗口不会无限膨胀。
+    MAX_TOOL_ROUNDS_PER_CHUNK = max(1, int(
+        _ea.pick_default("4", *_ea.MAX_TOOL_ROUNDS_PER_CHUNK)
+    ))
+    total_max = max(1, int(ctx.max_tool_rounds))
+
     api_msgs = build_api_projection_messages(chat_sess.messages)
     compact_result = maybe_compact_context_messages(api_msgs, llm)
     persist_compact_summary(chat_sess.messages, compact_result)
-    n_before = len(api_msgs)
     tools_used: list[str] = []
     reply = ""
     err: str | None = None
     status: TaskStatus = "ok"
     usage: dict[str, int] | None = None
+    total_rounds_done = 0
+    _chunk_n_before = len(api_msgs)
 
     async def _run_loop() -> None:
-        nonlocal reply, tools_used, usage, status, err
+        nonlocal reply, tools_used, usage, status, err, api_msgs, total_rounds_done, _chunk_n_before
         try:
-            reply, meta, tools_used, _trace, loop_meta = await run_llm_tool_loop(
-                llm,
-                exe,
-                messages=api_msgs,
-                registry=reg,
-                max_tool_rounds=max(1, int(ctx.max_tool_rounds)),
-            )
-            if loop_meta.get("stopped_reason") == "cancelled":
-                status = "cancelled"
-            u = meta.get("usage") if isinstance(meta, dict) else None
-            if isinstance(u, dict):
-                usage = {str(k): int(v) for k, v in u.items() if isinstance(v, (int, float))}
+            while total_rounds_done < total_max:
+                remaining = total_max - total_rounds_done
+                chunk_rounds = min(MAX_TOOL_ROUNDS_PER_CHUNK, remaining)
+
+                reply, meta, chunk_tools, _trace, loop_meta = await run_llm_tool_loop(
+                    llm,
+                    exe,
+                    messages=api_msgs,
+                    registry=reg,
+                    max_tool_rounds=chunk_rounds,
+                )
+                total_rounds_done += chunk_rounds
+                tools_used = chunk_tools  # last chunk wins
+
+                # 合并新消息回 full_messages
+                merge_llm_tail_into_full(chat_sess.messages, api_msgs, _chunk_n_before)
+
+                # 累计 token 用量
+                u = meta.get("usage") if isinstance(meta, dict) else None
+                if isinstance(u, dict):
+                    if usage is None:
+                        usage = {}
+                    for k, v in u.items():
+                        if isinstance(v, (int, float)):
+                            usage[k] = usage.get(k, 0) + int(v)
+
+                stopped = loop_meta.get("stopped_reason")
+                if stopped == "no_tool_calls":
+                    break
+                if stopped == "cancelled":
+                    status = "cancelled"
+                    break
+
+                # 压缩 + 重建 projection，为下一段做准备
+                api_msgs = build_api_projection_messages(chat_sess.messages)
+                compact_result = maybe_compact_context_messages(api_msgs, llm)
+                persist_compact_summary(chat_sess.messages, compact_result)
+
+                # 注入 nudge 让 LLM 知道要继续（_auto_continue_nudge 标记，
+                # 在 _user_round_indices 中计入轮次，在 LFU/merge 中过滤）
+                nudge_msg = {
+                    "role": "user",
+                    "content": "continue",
+                    "_auto_continue_nudge": True,
+                }
+                chat_sess.messages.append(nudge_msg)
+
+                # 重建 projection（含 nudge），更新 n_before
+                api_msgs = build_api_projection_messages(chat_sess.messages)
+                _chunk_n_before = len(api_msgs)
+
         except Exception as e:
             status = "failed"
             err = str(e)
-            logger.exception("run_agent_task failed")
+            logger.exception("run_agent_task chunk failed")
 
     try:
         if ctx.timeout_sec and ctx.timeout_sec > 0:
@@ -176,7 +225,6 @@ async def run_agent_task(ctx: RunContext) -> TaskResult:
         status = "timeout"
         err = f"timeout after {ctx.timeout_sec}s"
 
-    tail = merge_llm_tail_into_full(chat_sess.messages, api_msgs, n_before)
     if not ctx.ephemeral:
         try:
             persist_chat_session(chat_sess, aid)
