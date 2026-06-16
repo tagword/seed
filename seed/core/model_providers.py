@@ -16,6 +16,8 @@ from seed_model_providers import (  # type: ignore[import-untyped, unused-ignore
     PROVIDER_CATALOG,
     USE_TYPE_LABELS,
     apply_chat_thinking_extra_body,
+    apply_chat_stream_options,
+    apply_provider_chat_headers,
     call_agnes_video_generation,
     call_image_generations,
     call_minimax_music_generation,
@@ -37,6 +39,7 @@ from seed_model_providers import (  # type: ignore[import-untyped, unused-ignore
     normalize_image_size,
     normalize_provider_id,
     normalize_reasoning_effort,
+    normalize_chat_usage,
     normalize_video_num_frames,
     normalize_volcengine_image_model,
     preset_auto_id,
@@ -51,6 +54,7 @@ from seed_model_providers import (  # type: ignore[import-untyped, unused-ignore
     resolve_video_protocol,
     should_send_reasoning_content,
     uses_deepseek_chat_protocol,
+    uses_full_reasoning_content_echo,
 )
 
 # Private helpers — re-exported from the module directly for tests

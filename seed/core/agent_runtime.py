@@ -838,47 +838,36 @@ def _context_compact_enabled() -> bool:
     )
 
 
-def _estimate_messages_tokens(messages: List[Dict[str, Any]], body_start: int) -> int:
-    """Estimate token count for messages body.
+def _api_prompt_tokens(
+    messages: List[Dict[str, Any]],
+    *,
+    api_prompt_tokens: Optional[int] = None,
+    meta: Optional[Dict[str, Any]] = None,
+) -> int:
+    """LLM API ``usage.prompt_tokens`` only — no local message estimation."""
+    _ = messages  # signature kept for call-site clarity
+    if api_prompt_tokens is not None and int(api_prompt_tokens) > 0:
+        return int(api_prompt_tokens)
+    if isinstance(meta, dict):
+        usage = meta.get("usage")
+        if isinstance(usage, dict):
+            pt = usage.get("prompt_tokens")
+            if isinstance(pt, (int, float)) and int(pt) > 0:
+                return int(pt)
+    return 0
 
-    Uses DeepSeek tokenizer (via seed_model_providers.token_counter) when available,
-    falls back to simple heuristic. Includes ~1500 token overhead for tool schemas.
-    """
-    try:
-        from seed_model_providers.token_counter import count_messages as _cnt_msgs
-        body = messages[body_start:]
-        # count_messages includes the remaining messages + schema overhead
-        counted = _cnt_msgs(body)
-        total = counted.get("total_tokens", 0) or 0
-        # Add tool-call schema overhead (~1500 tokens for typical tool registry)
-        total += 1500
-        return total
-    except Exception:
-        pass
-    try:
-        from seed.core.llm_exec import msg_text_to_str as _mts
-        from seed_model_providers.token_counter import count_tokens as _cnt_tok
-        total = 0
-        for m in messages[body_start:]:
-            content = m.get("content")
-            tool_calls = m.get("tool_calls")
-            if content is None and tool_calls:
-                content = json.dumps(tool_calls, ensure_ascii=False)
-                text = _mts(content) if content else ""
-                total += _cnt_tok(text) + 4
-            elif tool_calls:
-                # content 和 tool_calls 同时存在，分别计数
-                total += _cnt_tok(_mts(content) if content else "") + 4
-                total += _cnt_tok(json.dumps(tool_calls, ensure_ascii=False)) + 4
-            else:
-                text = _mts(content) if content else ""
-                total += _cnt_tok(text) + 4
-        total += 1500
-        return total
-    except Exception:
-        body = messages[body_start:]
-        raw = json.dumps(body, ensure_ascii=False)
-        return len(raw.encode("utf-8")) // 4
+
+def _record_peak_prompt_tokens(loop_meta: Dict[str, Any], meta: Optional[Dict[str, Any]]) -> None:
+    if not isinstance(meta, dict):
+        return
+    usage = meta.get("usage")
+    if not isinstance(usage, dict):
+        return
+    pt = usage.get("prompt_tokens")
+    if not isinstance(pt, (int, float)) or int(pt) <= 0:
+        return
+    prev = int(loop_meta.get("peak_prompt_tokens") or 0)
+    loop_meta["peak_prompt_tokens"] = max(prev, int(pt))
 
 
 # Runtime override for compact min tokens (set via API, not persisted)
@@ -962,6 +951,89 @@ def _resolve_context_limit(model_name: Optional[str] = None) -> int:
     _fallback = min_tok * 10
     logger.info("[CTX_LIMIT] fallback min_tok=%s context_limit=%s", min_tok, _fallback)
     return _fallback
+
+
+def estimate_context_usage(
+    messages: List[Dict[str, Any]],
+    model_name: Optional[str] = None,
+) -> Dict[str, int]:
+    """Context usage metadata for Web UI (prompt_tokens filled only from API)."""
+    context_limit = _resolve_context_limit(model_name)
+    return {
+        "prompt_tokens": 0,
+        "context_limit": context_limit,
+        "message_count": len(messages),
+        "compact_min_tokens": _get_compact_min_tokens(),
+    }
+
+
+def build_context_usage_snapshot(
+    messages: List[Dict[str, Any]],
+    meta: Optional[Dict[str, Any]] = None,
+    model_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Context bar for Web UI — API ``usage.prompt_tokens`` only."""
+    snap: Dict[str, Any] = dict(estimate_context_usage(messages, model_name=model_name))
+    pt = _api_prompt_tokens(messages, meta=meta)
+    if pt > 0:
+        snap["prompt_tokens"] = pt
+        snap["source"] = "api"
+        if isinstance(meta, dict):
+            usage = meta.get("usage")
+            if isinstance(usage, dict):
+                snap["completion_tokens"] = int(usage.get("completion_tokens") or 0)
+    return snap
+
+
+def build_context_usage_from_run(
+    messages: List[Dict[str, Any]],
+    *,
+    loop_meta: Optional[Dict[str, Any]] = None,
+    last_meta: Optional[Dict[str, Any]] = None,
+    model_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Context snapshot for persistence — always prefer ``peak_prompt_tokens`` from the run."""
+    peak = 0
+    if isinstance(loop_meta, dict):
+        peak = int(loop_meta.get("peak_prompt_tokens") or 0)
+    meta_for_snap: Optional[Dict[str, Any]] = None
+    usage: Dict[str, Any] = {}
+    if isinstance(last_meta, dict) and isinstance(last_meta.get("usage"), dict):
+        usage.update(last_meta["usage"])
+    if peak > 0:
+        usage["prompt_tokens"] = max(int(usage.get("prompt_tokens") or 0), peak)
+    if usage:
+        meta_for_snap = {"usage": usage}
+    snap = build_context_usage_snapshot(messages, meta_for_snap, model_name=model_name)
+    snap["compact_min_tokens"] = _get_compact_min_tokens()
+    if peak > int(snap.get("prompt_tokens") or 0):
+        snap["prompt_tokens"] = peak
+        snap["source"] = "api"
+    if peak > 0:
+        snap["peak_prompt_tokens"] = peak
+    return snap
+
+
+def apply_context_usage_metadata(
+    metadata: Dict[str, Any],
+    snap: Dict[str, Any],
+    *,
+    updated_at: str = "",
+) -> None:
+    """Write API-only context bar values into session metadata (for page refresh)."""
+    pt = int(snap.get("prompt_tokens") or 0)
+    peak = int(snap.get("peak_prompt_tokens") or pt)
+    best = max(pt, peak)
+    metadata["context_usage"] = {
+        "prompt_tokens": best,
+        "peak_prompt_tokens": peak if peak > 0 else best,
+        "context_limit": int(snap.get("context_limit") or 0),
+        "message_count": int(snap.get("message_count") or 0),
+        "compact_min_tokens": int(snap.get("compact_min_tokens") or _get_compact_min_tokens()),
+        "updated_at": updated_at,
+    }
+    if snap.get("source"):
+        metadata["context_usage"]["source"] = snap["source"]
 
 
 def _format_transcript_for_summary(chunks: List[Dict[str, Any]], max_chars: int) -> str:
@@ -1122,8 +1194,9 @@ def maybe_compact_context_messages(
     返回压缩信息字典（供调用者写回持久化消息），或 ``None``（未触发压缩）。
 
     Args:
-        api_prompt_tokens: If provided (from last API response), use this instead
-            of local estimation for the compact trigger check. More accurate.
+        api_prompt_tokens: If provided (from last API response or persisted
+            context_usage), used as the compact trigger. Required — no local
+            message token estimation.
 
     Env (``CODEAGENT_*`` aliases still honored):
       SEED_CONTEXT_COMPACT=1
@@ -1147,11 +1220,12 @@ def maybe_compact_context_messages(
     if keep_rounds < 1:
         return None
 
-    # Use API-reported prompt_tokens if available (more accurate than estimation)
-    if api_prompt_tokens is not None and api_prompt_tokens > 0:
-        cur_tokens = api_prompt_tokens
-    else:
-        cur_tokens = _estimate_messages_tokens(messages, body_start)
+    cur_tokens = _api_prompt_tokens(
+        messages,
+        api_prompt_tokens=api_prompt_tokens,
+    )
+    if cur_tokens <= 0:
+        return None
     try:
         warn_ratio = float(_ea.pick_default("0.85", *_ea.CONTEXT_COMPACT_WARN_RATIO) or 0.85)
     except Exception:
@@ -1309,7 +1383,6 @@ def maybe_compact_context_messages(
     )
     sys_msg["content"] = base + block
     messages[:] = [sys_msg] + recent
-    tokens_after = _estimate_messages_tokens(messages, body_start)
     emit_chat_event(
         {
             "type": "context_compact",
@@ -1318,17 +1391,6 @@ def maybe_compact_context_messages(
             "summary_chars": int(len(combined)),
             "compact_min_tokens": int(min_tokens),
             "prompt_tokens_before": int(cur_tokens),
-            "prompt_tokens_after": int(tokens_after),
-        }
-    )
-    emit_chat_event(
-        {
-            "type": "context_usage",
-            "prompt_tokens": int(tokens_after),
-            "compact_min_tokens": int(min_tokens),
-            "context_limit": int(_resolve_context_limit(getattr(llm, "model", None))),
-            "message_count": int(len(messages)),
-            "compacted": True,
         }
     )
     logger.info(
@@ -1425,6 +1487,26 @@ def _stream_llm_round(
         pass
 
     return full_text, tool_calls, metadata
+
+
+def _emit_context_usage_snapshot(
+    messages: List[Dict[str, Any]],
+    meta: Optional[Dict[str, Any]] = None,
+    model_name: Optional[str] = None,
+    *,
+    loop_meta: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Push in-flight context size to Web UI (tool-loop rounds)."""
+    try:
+        snap = build_context_usage_from_run(
+            messages,
+            loop_meta=loop_meta,
+            last_meta=meta,
+            model_name=model_name,
+        )
+        emit_chat_event({"type": "context_usage", **snap})
+    except Exception:
+        logger.debug("context_usage snapshot emit failed", exc_info=True)
 
 
 async def _execute_tool_with_cancel(
@@ -1534,6 +1616,7 @@ async def run_llm_tool_loop(
                 reasoning_effort=reasoning_effort,
             )
             last_meta = meta or {}
+            _record_peak_prompt_tokens(loop_meta, last_meta)
 
             assistant_msg: Dict[str, Any] = {"role": "assistant", "content": content}
             rc = last_meta.get("reasoning_content")
@@ -1544,6 +1627,9 @@ async def run_llm_tool_loop(
             messages.append(assistant_msg)
 
             if not tool_calls:
+                _emit_context_usage_snapshot(
+                    messages, last_meta, model_name=_model_name, loop_meta=loop_meta
+                )
                 if on_round_persist:
                     try:
                         on_round_persist(list(tool_trace), list(tools_used))
@@ -1551,6 +1637,10 @@ async def run_llm_tool_loop(
                         pass
                 loop_meta["stopped_reason"] = "no_tool_calls"
                 return content, last_meta, tools_used, tool_trace, loop_meta
+
+            _emit_context_usage_snapshot(
+                messages, last_meta, model_name=_model_name, loop_meta=loop_meta
+            )
 
             for tc in tool_calls:
                 if is_chat_cancelled():

@@ -51,7 +51,7 @@ def test_persist_compact_summary_uses_boundary_source_idx(seed_home: Path) -> No
         full[i]["content"] = full[i]["content"] + ("x" * 800)
 
     api = build_api_projection_messages(full)
-    result = maybe_compact_context_messages(api, _llm("new summary"))
+    result = maybe_compact_context_messages(api, _llm("new summary"), api_prompt_tokens=5000)
     assert result is not None
     assert result["boundary_source_idx"] == 4
 
@@ -69,7 +69,7 @@ def test_bytes_forced_compact_with_two_user_rounds(seed_home: Path) -> None:
         full.append({"role": "tool", "name": "bash", "content": "y" * 1200})
 
     api = build_api_projection_messages(full)
-    result = maybe_compact_context_messages(api, _llm("forced summary"))
+    result = maybe_compact_context_messages(api, _llm("forced summary"), api_prompt_tokens=5000)
     assert result is not None
     assert result["boundary_source_idx"] == 3
     assert persist_compact_summary(full, result) is True
@@ -94,7 +94,7 @@ def test_auto_continue_nudge_counted_as_user_round_in_compress(seed_home: Path) 
             full[i]["content"] = full[i]["content"] + ("z" * 800)
 
     api = build_api_projection_messages(full)
-    result = maybe_compact_context_messages(api, _llm("summary"))
+    result = maybe_compact_context_messages(api, _llm("summary"), api_prompt_tokens=5000)
     assert result is not None
     # user_idx（含 nudge）= [0,2,4,6], keep_rounds=3 → cut=user_idx[1]=2
     # boundary = body[1] = full[2] (assistant a1), _source_idx=2

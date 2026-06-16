@@ -50,7 +50,7 @@ class LLMAPIExecutor:
         self.maxOutputTokens = int(
             _ea.pick_default(str(maxOutputTokens), *_ea.LLM_MAX_TOKENS)
         )
-        from seed.core.model_providers import resolve_chat_protocol
+        from seed.core.model_providers import resolve_chat_protocol, apply_provider_chat_headers
 
         self.provider = (provider or "").strip()
         self.chat_protocol = resolve_chat_protocol(
@@ -61,6 +61,11 @@ class LLMAPIExecutor:
         }
         if self.api_key:
             self.headers["Authorization"] = f"{self.auth_scheme} {self.api_key}"
+        apply_provider_chat_headers(
+            provider=self.provider,
+            base_url=self.baseURL,
+            headers=self.headers,
+        )
 
     def _ensure_base_url(self) -> None:
 
@@ -149,7 +154,7 @@ def generate(
     else:
         resolved_thinking = bool(enable_thinking)
 
-    from seed.core.model_providers import apply_chat_thinking_extra_body
+    from seed.core.model_providers import apply_chat_thinking_extra_body, apply_chat_stream_options
 
     apply_chat_thinking_extra_body(
         chat_protocol=self.chat_protocol,
@@ -158,6 +163,7 @@ def generate(
         extra_body=extra_body,
         resolved_thinking=resolved_thinking,
         reasoning_effort=reasoning_effort,
+        model=self.model,
     )
     user_extra = _ea.pick_nonempty(*_ea.LLM_EXTRA_BODY)
     if user_extra:
@@ -340,8 +346,13 @@ def generate(
         # CoT-bearing field so persist/echo never drops DeepSeek's chain.
         reasoning_echo = (reasoning_content.strip() or reasoning.strip())
         raw_usage = data.get("usage", {})
-        if self.chat_protocol == "minimax" and isinstance(raw_usage, dict):
-            raw_usage = normalize_minimax_usage(raw_usage)
+        from seed.core.model_providers import normalize_chat_usage
+
+        raw_usage = normalize_chat_usage(
+            raw_usage if isinstance(raw_usage, dict) else {},
+            chat_protocol=self.chat_protocol,
+            provider=self.provider,
+        )
         metadata = {
             "model": self.model,
             "usage": raw_usage,
@@ -419,7 +430,7 @@ def generate_stream(
     else:
         resolved_thinking = bool(enable_thinking)
 
-    from seed.core.model_providers import apply_chat_thinking_extra_body
+    from seed.core.model_providers import apply_chat_thinking_extra_body, apply_chat_stream_options
 
     apply_chat_thinking_extra_body(
         chat_protocol=self.chat_protocol,
@@ -428,6 +439,7 @@ def generate_stream(
         extra_body=extra_body,
         resolved_thinking=resolved_thinking,
         reasoning_effort=reasoning_effort,
+        model=self.model,
     )
     user_extra = _ea.pick_nonempty(*_ea.LLM_EXTRA_BODY)
     if user_extra:
@@ -442,6 +454,8 @@ def generate_stream(
             pass
     for k, v in extra_body.items():
         params.setdefault(k, v)
+
+    apply_chat_stream_options(chat_protocol=self.chat_protocol, params=params)
 
     max_body = max_llm_request_body_bytes(self.baseURL, chat_protocol=self.chat_protocol)
     if max_body > 0:
@@ -545,8 +559,13 @@ def generate_stream(
 
         reasoning_echo = reasoning.strip()
         stream_usage = usage
-        if self.chat_protocol == "minimax" and isinstance(stream_usage, dict):
-            stream_usage = normalize_minimax_usage(stream_usage)
+        from seed.core.model_providers import normalize_chat_usage
+
+        stream_usage = normalize_chat_usage(
+            stream_usage if isinstance(stream_usage, dict) else {},
+            chat_protocol=self.chat_protocol,
+            provider=self.provider,
+        )
         metadata = {
             "model": self.model,
             "usage": stream_usage,
@@ -759,8 +778,12 @@ def _openai_chat_messages(
         return should_send_reasoning_content(chat_protocol=proto, base_url=base_url or "")
 
     include_rc = _should_send_reasoning_content()
-    _deepseek_proto = (chat_protocol or "") == "deepseek" or (
-        not chat_protocol and _is_deepseek_url(base_url)
+    from seed.core.model_providers import resolve_chat_protocol, uses_full_reasoning_content_echo
+
+    _full_rc_echo = uses_full_reasoning_content_echo(
+        chat_protocol=chat_protocol
+        or resolve_chat_protocol(provider="", base_url=base_url or ""),
+        base_url=base_url or "",
     )
     out: List[Dict[str, Any]] = []
     for m in messages:
@@ -798,7 +821,7 @@ def _openai_chat_messages(
         # Other backends: only send when we have tool_calls or a stored key, so
         # strict OpenAI-compatible proxies are not spammed with unknown fields.
         if include_rc and role == "assistant":
-            if _deepseek_proto:
+            if _full_rc_echo:
                 rc = m.get("reasoning_content")
                 row["reasoning_content"] = "" if rc is None else _msg_text_to_str(rc)
             elif m.get("tool_calls") or ("reasoning_content" in m):
@@ -1164,40 +1187,10 @@ def _parse_minimax_anthropic_response(data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def normalize_minimax_usage(usage: Dict[str, Any]) -> Dict[str, Any]:
-    """Map MiniMax usage payload → internal ``usage_accumulator`` keys.
+    """Backward-compatible alias — prefer ``normalize_chat_usage``."""
+    from seed.core.model_providers import normalize_chat_usage
 
-    MiniMax (OpenAI 兼容 + Anthropic 兼容) 响应:
-        ``usage.prompt_tokens_details.cached_tokens`` → 缓存命中
-        ``usage.cache_read_input_tokens``           → Anthropic 兼容
-        ``usage.cache_creation_input_tokens``        → 主动缓存创建量
-    Internal keys consumed by ``usage_accumulator``:
-        ``prompt_cache_hit_tokens``  /  ``prompt_cache_miss_tokens``
-    """
-    if not isinstance(usage, dict) or not usage:
-        return usage or {}
-    out = dict(usage)
-    cached = 0
-    try:
-        details = usage.get("prompt_tokens_details")
-        if isinstance(details, dict):
-            v = details.get("cached_tokens")
-            if isinstance(v, (int, float)):
-                cached += int(v)
-    except Exception:
-        pass
-    for k in ("cache_read_input_tokens", "cache_creation_input_tokens"):
-        v = usage.get(k)
-        if isinstance(v, (int, float)):
-            cached += int(v)
-    if cached > 0:
-        out["prompt_cache_hit_tokens"] = cached
-        try:
-            pt = usage.get("prompt_tokens")
-            if isinstance(pt, (int, float)):
-                out["prompt_cache_miss_tokens"] = max(0, int(pt) - cached)
-        except Exception:
-            pass
-    return out
+    return normalize_chat_usage(usage, chat_protocol="minimax", provider="minimax")
 
 
 MINIMAX_CONTEXT_WINDOWS: Dict[str, int] = {
