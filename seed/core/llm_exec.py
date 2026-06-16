@@ -183,7 +183,7 @@ def generate(
     # SEED_LLM_CONTEXT_SIZE to the inference server's *effective* KV token pool
     # (e.g. SGLang ``max_total_num_tokens`` minus headroom), not always the model's
     # configured ``context_len`` when VRAM limits the cache.
-    ctx = int(_ea.pick_default("262144", *_ea.LLM_CONTEXT_SIZE))
+    ctx = int(_ea.pick_default("262144", *_ea.LLM_CONTEXT_SIZE) or "262144")
     if ctx > 0:
         body = json.dumps(
             {"messages": params["messages"], "tools": tools or []},
@@ -222,7 +222,7 @@ def generate(
                 reasoning_effort=reasoning_effort,
             )
             est_n = int(est.get("input_tokens") or 0)
-            ctx_override = int(_ea.pick_default("0", *_ea.LLM_CONTEXT_SIZE)) or None
+            ctx_override = int(_ea.pick_default("0", *_ea.LLM_CONTEXT_SIZE) or "0") or None
             err = precheck_minimax_context(
                 model=self.model,
                 estimated_input_tokens=est_n,
