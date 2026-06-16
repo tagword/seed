@@ -946,11 +946,15 @@ def _resolve_context_limit(model_name: Optional[str] = None) -> int:
             if ctx > 0:
                 logger.info("[CTX_LIMIT] model=%s resolved=%s (minimax)", model_name, ctx)
                 return ctx
-            # Try known model prefixes
+            # Try known model prefixes (including after provider/ prefix)
+            _match_names = [_mn]
+            if "/" in _mn:
+                _match_names.append(_mn.split("/", 1)[1])
             for _prefix, _ctx in _KNOWN_CONTEXT_WINDOWS.items():
-                if _mn.startswith(_prefix):
-                    logger.info("[CTX_LIMIT] model=%s resolved=%s (known=%s)", model_name, _ctx, _prefix)
-                    return _ctx
+                for _n in _match_names:
+                    if _n.startswith(_prefix):
+                        logger.info("[CTX_LIMIT] model=%s resolved=%s (known=%s)", model_name, _ctx, _prefix)
+                        return _ctx
             logger.info("[CTX_LIMIT] model=%s not found in any catalog, fallback", model_name)
         except Exception as e:
             logger.info("[CTX_LIMIT] lookup failed: %s", e)
