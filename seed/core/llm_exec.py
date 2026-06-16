@@ -489,6 +489,12 @@ def generate_stream(
             except json.JSONDecodeError:
                 continue
 
+            # usage may appear in final chunk (sglang-style) or separate key — 
+            # must extract BEFORE `if not choices: continue` so we don't lose it.
+            raw_usage = chunk.get("usage")
+            if raw_usage:
+                usage = raw_usage
+
             choices = chunk.get("choices") or []
             if not choices:
                 continue
@@ -497,10 +503,6 @@ def generate_stream(
             fr = choices[0].get("finish_reason")
             if fr:
                 finish_reason = fr
-            # usage may appear in final chunk (sglang-style) or separate key
-            raw_usage = chunk.get("usage")
-            if raw_usage:
-                usage = raw_usage
 
             # Content delta
             text = _msg_text_to_str(delta.get("content"))

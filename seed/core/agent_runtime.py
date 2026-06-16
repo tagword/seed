@@ -861,10 +861,18 @@ def _estimate_messages_tokens(messages: List[Dict[str, Any]], body_start: int) -
         total = 0
         for m in messages[body_start:]:
             content = m.get("content")
-            if content is None and m.get("tool_calls"):
-                content = json.dumps(m.get("tool_calls"), ensure_ascii=False)
-            text = _mts(content) if content else ""
-            total += _cnt_tok(text) + 4
+            tool_calls = m.get("tool_calls")
+            if content is None and tool_calls:
+                content = json.dumps(tool_calls, ensure_ascii=False)
+                text = _mts(content) if content else ""
+                total += _cnt_tok(text) + 4
+            elif tool_calls:
+                # content 和 tool_calls 同时存在，分别计数
+                total += _cnt_tok(_mts(content) if content else "") + 4
+                total += _cnt_tok(json.dumps(tool_calls, ensure_ascii=False)) + 4
+            else:
+                text = _mts(content) if content else ""
+                total += _cnt_tok(text) + 4
         total += 1500
         return total
     except Exception:
