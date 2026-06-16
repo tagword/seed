@@ -964,53 +964,6 @@ def _resolve_context_limit(model_name: Optional[str] = None) -> int:
     return _fallback
 
 
-def estimate_context_usage(
-    messages: List[Dict[str, Any]],
-    model_name: Optional[str] = None,
-) -> Dict[str, int]:
-    """
-    Context size estimate in tokens for UI display.
-    Returns prompt_tokens (estimated or from API) + context_limit.
-    """
-    context_limit = _resolve_context_limit(model_name)
-    if not messages:
-        return {"prompt_tokens": 0, "context_limit": context_limit, "message_count": 0}
-    has_system = messages[0].get("role") == "system"
-    body_start = 1 if has_system else 0
-    estimated = _estimate_messages_tokens(messages, body_start)
-    return {
-        "prompt_tokens": estimated,
-        "context_limit": context_limit,
-        "message_count": len(messages),
-        "compact_min_tokens": _get_compact_min_tokens(),
-    }
-
-
-def build_context_usage_snapshot(
-    messages: List[Dict[str, Any]],
-    meta: Optional[Dict[str, Any]] = None,
-    model_name: Optional[str] = None,
-) -> Dict[str, Any]:
-    """
-    Context bar for Web UI — all values in tokens.
-
-    Prefer the latest API ``usage.prompt_tokens`` (tokens actually sent on the last
-    model call, including tools schema). Fall back to estimated tokens when no usage yet.
-    """
-    snap: Dict[str, Any] = dict(estimate_context_usage(messages, model_name=model_name))
-    if not isinstance(meta, dict):
-        return snap
-    usage = meta.get("usage")
-    if not isinstance(usage, dict):
-        return snap
-    pt = usage.get("prompt_tokens")
-    if isinstance(pt, (int, float)) and int(pt) > 0:
-        snap["prompt_tokens"] = int(pt)
-        snap["completion_tokens"] = int(usage.get("completion_tokens") or 0)
-        snap["source"] = "api"
-    return snap
-
-
 def _format_transcript_for_summary(chunks: List[Dict[str, Any]], max_chars: int) -> str:
     from seed.core.llm_exec import msg_text_to_str
 
@@ -1474,29 +1427,6 @@ def _stream_llm_round(
     return full_text, tool_calls, metadata
 
 
-def _emit_context_usage_snapshot(
-    messages: List[Dict[str, Any]],
-    meta: Optional[Dict[str, Any]] = None,
-    model_name: Optional[str] = None,
-) -> None:
-    """Push in-flight context size to Web UI (tool-loop rounds)."""
-    try:
-        snap = build_context_usage_snapshot(messages, meta, model_name=model_name)
-        _src = snap.get("source", "estimate")
-        _pt = snap.get("prompt_tokens", 0)
-        _cl = snap.get("context_limit", 0)
-        _mc = snap.get("message_count", 0)
-        _pct = round(_pt / _cl * 100, 1) if _cl else 0
-        logger.info(
-            "[DEBUG_CONTEXT] source=%s prompt_tokens=%s context_limit=%s msg_count=%s pct=%s%%",
-            _src, _pt, _cl, _mc, _pct,
-        )
-        snap["compact_min_tokens"] = _get_compact_min_tokens()
-        emit_chat_event({"type": "context_usage", **snap})
-    except Exception:
-        logger.debug("context_usage snapshot emit failed", exc_info=True)
-
-
 async def _execute_tool_with_cancel(
     executor: ToolExecutor,
     tool_name: str,
@@ -1614,7 +1544,6 @@ async def run_llm_tool_loop(
             messages.append(assistant_msg)
 
             if not tool_calls:
-                _emit_context_usage_snapshot(messages, last_meta, model_name=_model_name)
                 if on_round_persist:
                     try:
                         on_round_persist(list(tool_trace), list(tools_used))
@@ -1622,8 +1551,6 @@ async def run_llm_tool_loop(
                         pass
                 loop_meta["stopped_reason"] = "no_tool_calls"
                 return content, last_meta, tools_used, tool_trace, loop_meta
-
-            _emit_context_usage_snapshot(messages, last_meta, model_name=_model_name)
 
             for tc in tool_calls:
                 if is_chat_cancelled():
@@ -1717,8 +1644,6 @@ async def run_llm_tool_loop(
                             reply = c if isinstance(c, str) else str(c or "")
                             break
                     return reply, last_meta, tools_used, tool_trace, loop_meta
-
-            _emit_context_usage_snapshot(messages, model_name=_model_name)
 
         loop_meta["stopped_reason"] = "max_tool_rounds"
         reply = ""
