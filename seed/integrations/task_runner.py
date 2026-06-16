@@ -19,7 +19,9 @@ from seed.core.agent_context import (
 )
 from seed.core.agent_runtime import (
     build_api_projection_messages,
+    maybe_compact_context_messages,
     merge_llm_tail_into_full,
+    persist_compact_summary,
     run_llm_tool_loop,
 )
 from seed.core.llm_presets import new_llm_executor_from_preset
@@ -120,7 +122,6 @@ async def run_agent_task(ctx: RunContext) -> TaskResult:
 
     chat_sess.messages.append({"role": "user", "content": ctx.user_message})
 
-    max_hist = int(_ea.pick_default("12", *_ea.CHAT_USER_ROUNDS))
     llm = new_llm_executor_from_preset(ctx.llm_preset_id)
     reg, exe = get_tools_for_agent(aid)
     set_active_llm_session(sid)
@@ -136,7 +137,9 @@ async def run_agent_task(ctx: RunContext) -> TaskResult:
         set_active_project_episodic(False)
         clear_active_project_workspace()
 
-    api_msgs = build_api_projection_messages(chat_sess.messages, max_user_rounds=max_hist)
+    api_msgs = build_api_projection_messages(chat_sess.messages)
+    compact_result = maybe_compact_context_messages(api_msgs, llm)
+    persist_compact_summary(chat_sess.messages, compact_result)
     n_before = len(api_msgs)
     tools_used: list[str] = []
     reply = ""

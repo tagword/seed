@@ -684,20 +684,20 @@ def persist_compact_summary(
 def build_api_projection_messages(
     full_messages: List[Dict[str, Any]],
     *,
-    max_user_rounds: int,
     skills_suffix: Optional[str] = None,
     cursor: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Deep-copy ``full_messages`` and apply in-memory-only shaping for the LLM:
-    optional skills suffix on ``system``, then ``trim_messages_by_user_rounds``.
+    optional skills suffix on ``system``.
 
     **链式摘要重建**：扫描 ``_compact_summary`` 字段（见 ``maybe_compact_context_messages``），
     找到最新的边界消息，将其之前的所有消息替换为 ``<<<SEED_COMPACT>>>`` 块注入 system prompt，
     从而避免每轮用全部原始消息做投影。
 
     **会话游标**（``cursor`` 参数）：
-      - None / ``{"mode": "tail"}``：默认行为，从末尾投影最近 N 轮
+      - None / ``{"mode": "tail"}``：默认行为，从末尾向后取全部消息
+        （由上层 ``maybe_compact_context_messages`` 负责压缩控制）
       - ``{"mode": "head", "from_idx": N}``：从 ``full_messages[N]`` 开始投影（回滚模式），
         此时跳过链式摘要重建（因为用户想从头看原始消息）
 
@@ -750,8 +750,6 @@ def build_api_projection_messages(
 
     if skills_suffix and api and api[0].get("role") == "system":
         api[0]["content"] = str(api[0].get("content") or "").rstrip() + skills_suffix
-    if max_user_rounds > 0:
-        api[:] = trim_messages_by_user_rounds(api, max_user_rounds)
     # Drop tool_calls with invalid JSON arguments first (historical self-heal
     # for sessions saved before llm_exec started validating them), then remove
     # assistant turns that became empty as a result, then clean orphans.
@@ -1209,8 +1207,7 @@ def maybe_compact_context_messages(
         return None
 
     if len(user_idx) <= keep_rounds:
-        if not exceeds_tokens or len(user_idx) <= 1:
-            return None
+        # 轮数很少但 token 超出阈值 → 压缩历史，保留最后 1 轮
         effective_keep = max(1, len(user_idx) - 1)
     else:
         effective_keep = keep_rounds

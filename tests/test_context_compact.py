@@ -22,6 +22,9 @@ def seed_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("SEED_CONTEXT_COMPACT", "1")
     monkeypatch.setenv("SEED_CONTEXT_COMPACT_MIN_TOKENS", "250")
     monkeypatch.setenv("SEED_CONTEXT_COMPACT_KEEP_USER_ROUNDS", "2")
+    # 确保 _summarizer_llm 回退到 mock LLM，而非读全局 env 创建真 executor
+    monkeypatch.delenv("SEED_CONTEXT_COMPACT_SUMMARIZER_BASEURL", raising=False)
+    monkeypatch.delenv("SEED_CONTEXT_COMPACT_SUMMARIZER_MODEL", raising=False)
     return tmp_path
 
 
@@ -47,13 +50,14 @@ def test_persist_compact_summary_uses_boundary_source_idx(seed_home: Path) -> No
     for i in (1, 3, 5, 6):
         full[i]["content"] = full[i]["content"] + ("x" * 800)
 
-    api = build_api_projection_messages(full, max_user_rounds=12)
+    api = build_api_projection_messages(full)
     result = maybe_compact_context_messages(api, _llm("new summary"))
     assert result is not None
     assert result["boundary_source_idx"] == 4
 
     assert persist_compact_summary(full, result) is True
-    assert full[4]["_compact_summary"] == "new summary"
+    # summary 包含时间戳前缀 + 旧摘要链式追加
+    assert "old summary\n\n[continued]\n\nnew summary" in full[4]["_compact_summary"]
     assert full[2]["_compact_summary"] == "old summary"
 
 
@@ -64,12 +68,12 @@ def test_bytes_forced_compact_with_two_user_rounds(seed_home: Path) -> None:
         full.append({"role": "assistant", "content": "x" * 1200})
         full.append({"role": "tool", "name": "bash", "content": "y" * 1200})
 
-    api = build_api_projection_messages(full, max_user_rounds=12)
+    api = build_api_projection_messages(full)
     result = maybe_compact_context_messages(api, _llm("forced summary"))
     assert result is not None
-    assert result["boundary_source_idx"] == 2
+    assert result["boundary_source_idx"] == 3
     assert persist_compact_summary(full, result) is True
-    assert "forced summary" in full[2]["_compact_summary"]
+    assert "forced summary" in full[3]["_compact_summary"]
 
 
 def test_auto_continue_nudge_not_counted_as_user_round(seed_home: Path) -> None:
@@ -88,10 +92,10 @@ def test_auto_continue_nudge_not_counted_as_user_round(seed_home: Path) -> None:
         if full[i]["role"] in {"assistant", "tool", "user"} and full[i]["content"].startswith("real"):
             full[i]["content"] = full[i]["content"] + ("z" * 800)
 
-    api = build_api_projection_messages(full, max_user_rounds=12)
+    api = build_api_projection_messages(full)
     result = maybe_compact_context_messages(api, _llm("summary"))
     assert result is not None
-    assert result["boundary_source_idx"] == 2
+    assert result["boundary_source_idx"] == 4
 
 
 def test_merge_llm_tail_skips_auto_continue_nudge(seed_home: Path) -> None:

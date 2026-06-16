@@ -245,7 +245,7 @@ def test_build_api_projection_messages_heals_real_broken_session() -> None:
             "tool_call_id": "call_function_efq2r9fxz1qp_1",
         },
     ]
-    api = build_api_projection_messages(full_messages, max_user_rounds=10)
+    api = build_api_projection_messages(full_messages)
     # No surviving tool_call with empty/non-JSON arguments.
     for m in api:
         for tc in m.get("tool_calls") or []:

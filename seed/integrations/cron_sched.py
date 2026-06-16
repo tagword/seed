@@ -276,7 +276,6 @@ async def _run_cron_job_async(job: Dict[str, Any]) -> None:
             "ts": datetime.now(timezone.utc).isoformat(),
         }
     )
-    max_hist = int(_ea.pick_default("12", *_ea.CHAT_USER_ROUNDS))
 
     # Resolve LLM config from presets / env
     llm = llm_executor_from_resolved(resolve_preset(None))
@@ -287,7 +286,6 @@ async def _run_cron_job_async(job: Dict[str, Any]) -> None:
     try:
         api_msgs = build_api_projection_messages(
             chat_sess.messages,
-            max_user_rounds=max_hist,
             skills_suffix=None,
         )
         compact_result = maybe_compact_context_messages(api_msgs, llm)
@@ -693,7 +691,6 @@ def run_cron_job_sync(job: Dict[str, Any]) -> None:
             "ts": datetime.now(timezone.utc).isoformat(),
         }
     )
-    max_hist = int(_ea.pick_default("12", *_ea.CHAT_USER_ROUNDS))
 
     # Resolve LLM config from presets / env (see resolve_preset)
     llm = llm_executor_from_resolved(resolve_preset(None))
@@ -703,7 +700,6 @@ def run_cron_job_sync(job: Dict[str, Any]) -> None:
     try:
         api_msgs = build_api_projection_messages(
             chat_sess.messages,
-            max_user_rounds=max_hist,
             skills_suffix=None,
         )
         compact_result = maybe_compact_context_messages(api_msgs, llm)
