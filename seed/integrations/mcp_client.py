@@ -159,7 +159,7 @@ class MCPStdioSession:
                 continue
             try:
                 msg = json.loads(stripped)
-            except json.JSONDecodeError as e:
+            except json.JSONDecodeError:
                 logger.warning("MCP non-JSON line from %s: %s", self.cfg.server_id, stripped[:200])
                 continue
             if msg.get("id") == rid:
@@ -574,6 +574,451 @@ def _extract_content_text(content: Any) -> str:
     return "\n".join(p for p in parts if p)
 
 
+class MCPStreamableHttpSession:
+    """MCP client session over Streamable HTTP transport (Spec 2025-06-18).
+
+    Uses a single MCP endpoint for both sending requests and receiving responses.
+    Synchronous responses arrive directly in the HTTP POST response body.
+    Optional SSE streaming for server-push notifications.
+
+    Key differences from the deprecated HTTP+SSE (``MCPSseSession``):
+    - Single endpoint URL (no separate SSE/POST URLs)
+    - ``MCP-Protocol-Version`` header on all requests
+    - sessionId extracted from ``initialize`` response ``_meta.sessionId``
+    - SSE connection is optional (only for streaming subscriptions)
+    """
+
+    # Latest protocol version for Streamable HTTP transport
+    _PROTOCOL_VERSION_HTTP = "2025-11-25"
+
+    def __init__(self, cfg: MCPServerConfig):
+        if cfg.transport != "streamable-http":
+            raise MCPError(
+                f"Unsupported transport {cfg.transport!r} for Streamable HTTP session"
+            )
+        if not cfg.url.strip():
+            raise MCPError(
+                f"MCP Streamable HTTP server {cfg.server_id!r}: url is required"
+            )
+        self.cfg = cfg
+        self._url = cfg.url.strip().rstrip("/")
+        self._session_id: Optional[str] = None
+        self._lock = threading.Lock()
+        self._response_lock = threading.Lock()
+        self._req_id = 0
+        self._pending: Dict[int, threading.Event] = {}
+        self._results: Dict[int, Any] = {}
+        self._ready = False
+        self._client: Any = None  # httpx.Client
+        self._sse_thread: Optional[threading.Thread] = None
+        self._close_flag = threading.Event()
+
+    # ------------------------------------------------------------------ #
+    #  HTTP client helpers
+    # ------------------------------------------------------------------ #
+
+    def _http_client(self) -> Any:
+        """Lazy import httpx and create client with custom headers."""
+        if self._client is None:
+            import httpx
+
+            hdrs = {}
+            # MCP-Protocol-Version header (required by Streamable HTTP spec)
+            hdrs["MCP-Protocol-Version"] = self._PROTOCOL_VERSION_HTTP
+            if self.cfg.headers:
+                # User-defined headers (e.g. Authorization) override defaults
+                hdrs.update(self.cfg.headers)
+            try:
+                from seed_model_providers import httpx_trust_env_for
+
+                trust_env = httpx_trust_env_for(self._url)
+            except Exception:
+                trust_env = True
+            self._client = httpx.Client(
+                timeout=httpx.Timeout(300.0, connect=30.0),
+                headers=hdrs,
+                trust_env=trust_env,
+            )
+        return self._client
+
+    def _headers(self) -> Dict[str, str]:
+        """Return per-request extra headers (content-type + optional session)."""
+        h: Dict[str, str] = {"Content-Type": "application/json"}
+        if self._session_id:
+            h["MCP-Session-Id"] = self._session_id
+        return h
+
+    # ------------------------------------------------------------------ #
+    #  SSE reader (optional — for server-push notifications)
+    # ------------------------------------------------------------------ #
+
+    def _parse_sse_event(self, line: str) -> tuple[Optional[str], Optional[str]]:
+        """Parse a single SSE line. Returns (event_type, data) or (None, None)."""
+        line = line.strip()
+        if not line:
+            return None, None
+        if line.startswith("event:"):
+            return line[len("event:") :].strip(), None
+        if line.startswith("data:"):
+            return None, line[len("data:") :].strip()
+        if line.startswith("event "):
+            return line[len("event ") :].strip(), None
+        if line.startswith("data "):
+            return None, line[len("data ") :].strip()
+        return None, None
+
+    def _handle_sse_event(self, event: str, data: str) -> None:
+        """Handle a single SSE event from the stream."""
+        if event == "message":
+            try:
+                msg = json.loads(data)
+            except json.JSONDecodeError:
+                logger.warning(
+                    "MCP Streamable HTTP %s: bad JSON in SSE message",
+                    self.cfg.server_id,
+                )
+                return
+            rid = msg.get("id")
+            if rid is not None:
+                with self._response_lock:
+                    self._results[rid] = msg
+                    ev = self._pending.get(rid)
+                if ev:
+                    ev.set()
+        # Other event types are logged for debugging
+        elif event:
+            logger.debug(
+                "MCP Streamable HTTP %s: unhandled SSE event %r",
+                self.cfg.server_id,
+                event,
+            )
+
+    def _sse_reader(self) -> None:
+        """Background thread: read SSE stream and dispatch messages."""
+        try:
+            client = self._http_client()
+            with client.stream("GET", self._url) as response:
+                if response.status_code != 200:
+                    logger.error(
+                        "MCP Streamable HTTP %s: SSE GET %s returned %d",
+                        self.cfg.server_id,
+                        self._url,
+                        response.status_code,
+                    )
+                    return
+                current_event: Optional[str] = None
+                data_lines: list[str] = []
+
+                for chunk in response.iter_lines():
+                    if self._close_flag.is_set():
+                        break
+                    line = chunk.strip()
+                    if not line:
+                        # Empty line = event boundary
+                        if current_event is not None and data_lines:
+                            self._handle_sse_event(
+                                current_event, "\n".join(data_lines)
+                            )
+                        current_event = None
+                        data_lines = []
+                        continue
+
+                    if line.startswith("event:"):
+                        current_event = line[len("event:") :].strip()
+                    elif line.startswith("data:"):
+                        data_lines.append(line[len("data:") :].strip())
+                    # SSE comments (starting with :) are ignored
+
+                # Handle last event if no trailing blank line
+                if current_event is not None and data_lines:
+                    self._handle_sse_event(current_event, "\n".join(data_lines))
+
+        except Exception as e:
+            if not self._close_flag.is_set():
+                logger.error(
+                    "MCP Streamable HTTP %s SSE reader error: %s",
+                    self.cfg.server_id,
+                    e,
+                )
+
+    # ------------------------------------------------------------------ #
+    #  Initialization
+    # ------------------------------------------------------------------ #
+
+    def _start(self) -> None:
+        """Connect and initialize the session (lazy, called on first use)."""
+        if self._ready:
+            return
+        if self._close_flag.is_set():
+            raise MCPError("MCP Streamable HTTP session already closed")
+
+        init_timeout = float(pick_default("30", *MCP_INIT_TIMEOUT) or "30")
+
+        # Send initialize — response comes directly in HTTP body
+        result = self._request(
+            "initialize",
+            {
+                "protocolVersion": self._PROTOCOL_VERSION_HTTP,
+                "capabilities": {},
+                "clientInfo": {"name": _CLIENT_NAME, "version": _CLIENT_VERSION},
+            },
+            timeout=init_timeout,
+        )
+        if not isinstance(result, dict):
+            raise MCPError("initialize returned invalid result")
+
+        # Extract sessionId from _meta (Streamable HTTP spec)
+        meta = result.get("_meta") or {}
+        sid = meta.get("sessionId")
+        if sid:
+            self._session_id = str(sid).strip()
+            logger.info(
+                "MCP Streamable HTTP %s: session %s established",
+                self.cfg.server_id,
+                self._session_id,
+            )
+
+        # Send initialized notification (fire-and-forget)
+        try:
+            self._send_notification("notifications/initialized")
+        except Exception:
+            pass
+
+        self._ready = True
+        logger.info(
+            "MCP Streamable HTTP server %s ready: %s",
+            self.cfg.server_id,
+            (result.get("serverInfo") or {}).get("name", "?"),
+        )
+
+    # ------------------------------------------------------------------ #
+    #  JSON-RPC message helpers
+    # ------------------------------------------------------------------ #
+
+    def _send_notification(
+        self, method: str, params: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Send a JSON-RPC notification (no id)."""
+        payload = {
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params if params is not None else {},
+        }
+        client = self._http_client()
+        resp = client.post(self._url, json=payload, headers=self._headers())
+        resp.raise_for_status()
+
+    def _request(
+        self,
+        method: str,
+        params: Optional[Dict[str, Any]] = None,
+        *,
+        timeout: float = 60.0,
+    ) -> Any:
+        """Send a JSON-RPC request and return the response.
+
+        In Streamable HTTP, sync responses arrive directly in the HTTP POST
+        response body (no need to wait for SSE for simple operations).
+        """
+        self._req_id += 1
+        rid = self._req_id
+        payload = {
+            "jsonrpc": "2.0",
+            "id": rid,
+            "method": method,
+            "params": params if params is not None else {},
+        }
+
+        client = self._http_client()
+        resp = client.post(self._url, json=payload, headers=self._headers())
+
+        if resp.status_code >= 400:
+            raise MCPError(
+                f"MCP Streamable HTTP {self.cfg.server_id}: "
+                f"POST {self._url} returned {resp.status_code}: {resp.text[:200]}"
+            )
+
+        # Check if response is SSE stream or direct JSON
+        ct = (resp.headers.get("content-type") or "").lower()
+
+        if "text/event-stream" in ct:
+            # Server chose to respond with SSE — use event-based dispatch
+            ev = threading.Event()
+            with self._response_lock:
+                self._pending[rid] = ev
+
+            try:
+                # Parse SSE events from the response body
+                current_event: Optional[str] = None
+                data_lines: list[str] = []
+
+                for line in resp.iter_lines():
+                    line = line.strip()
+                    if not line:
+                        if current_event is not None and data_lines:
+                            data = "\n".join(data_lines)
+                            self._handle_sse_event_inline(
+                                current_event, data, rid, ev
+                            )
+                        current_event = None
+                        data_lines = []
+                        continue
+                    if line.startswith("event:"):
+                        current_event = line[len("event:") :].strip()
+                    elif line.startswith("data:"):
+                        data_lines.append(line[len("data:") :].strip())
+
+                if current_event is not None and data_lines:
+                    data = "\n".join(data_lines)
+                    self._handle_sse_event_inline(current_event, data, rid, ev)
+
+                # Wait for the response to arrive via SSE
+                ok = ev.wait(timeout=timeout)
+                if not ok:
+                    raise MCPError(
+                        f"MCP Streamable HTTP {self.cfg.server_id}: "
+                        f"timeout ({timeout}s) waiting for SSE response "
+                        f"to {method!r} (id={rid})"
+                    )
+
+                with self._response_lock:
+                    msg = self._results.pop(rid, None)
+                    self._pending.pop(rid, None)
+
+                if msg is None:
+                    raise MCPError(
+                        f"MCP Streamable HTTP: no response for id={rid}"
+                    )
+                if "error" in msg and msg["error"] is not None:
+                    err = msg["error"]
+                    raise MCPError(f"MCP error: {err}")
+                return msg.get("result")
+
+            except MCPError:
+                raise
+            except Exception as e:
+                with self._response_lock:
+                    self._pending.pop(rid, None)
+                    self._results.pop(rid, None)
+                raise MCPError(
+                    f"MCP Streamable HTTP SSE request failed: {e}"
+                ) from e
+            finally:
+                with self._response_lock:
+                    self._pending.pop(rid, None)
+
+        else:
+            # Direct JSON response
+            try:
+                msg = resp.json()
+            except Exception as e:
+                raise MCPError(
+                    f"MCP Streamable HTTP {self.cfg.server_id}: "
+                    f"invalid JSON response: {e}"
+                ) from e
+
+            if isinstance(msg, list):
+                # May receive a batch response
+                for item in msg:
+                    if isinstance(item, dict) and item.get("id") == rid:
+                        msg = item
+                        break
+                else:
+                    raise MCPError(
+                        f"MCP Streamable HTTP: no matching response for id={rid}"
+                    )
+
+            if "error" in msg and msg["error"] is not None:
+                err = msg["error"]
+                raise MCPError(f"MCP error: {err}")
+            return msg.get("result")
+
+    def _handle_sse_event_inline(
+        self,
+        event: str,
+        data: str,
+        expected_rid: int,
+        ev: threading.Event,
+    ) -> None:
+        """Handle SSE event parsed from an inline streaming response."""
+        if event == "message":
+            try:
+                msg = json.loads(data)
+            except json.JSONDecodeError:
+                logger.warning(
+                    "MCP Streamable HTTP %s: bad JSON in SSE message",
+                    self.cfg.server_id,
+                )
+                return
+            rid = msg.get("id")
+            if rid == expected_rid:
+                with self._response_lock:
+                    self._results[rid] = msg
+                ev.set()
+
+    # ------------------------------------------------------------------ #
+    #  Public API
+    # ------------------------------------------------------------------ #
+
+    def list_tools(self) -> List[MCPToolInfo]:
+        with self._lock:
+            self._start()
+            result = self._request("tools/list", {}, timeout=30.0)
+        tools_raw = []
+        if isinstance(result, dict):
+            tools_raw = result.get("tools") or []
+        out: List[MCPToolInfo] = []
+        for t in tools_raw:
+            if not isinstance(t, dict):
+                continue
+            name = str(t.get("name") or "").strip()
+            if not name:
+                continue
+            out.append(
+                MCPToolInfo(
+                    name=name,
+                    description=str(t.get("description") or ""),
+                    input_schema=(
+                        t.get("inputSchema")
+                        if isinstance(t.get("inputSchema"), dict)
+                        else {}
+                    ),
+                )
+            )
+        return out
+
+    def call_tool(
+        self,
+        name: str,
+        arguments: Optional[Dict[str, Any]] = None,
+        *,
+        timeout: float = 120.0,
+    ) -> str:
+        with self._lock:
+            self._start()
+            result = self._request(
+                "tools/call",
+                {"name": name, "arguments": arguments or {}},
+                timeout=timeout,
+            )
+        return _format_tool_result(result)
+
+    def close(self) -> None:
+        self._close_flag.set()
+        if self._client is not None:
+            try:
+                self._client.close()
+            except Exception:
+                pass
+            self._client = None
+        self._ready = False
+        with self._response_lock:
+            for ev in self._pending.values():
+                ev.set()
+            self._pending.clear()
+            self._results.clear()
+
+
 class MCPClientManager:
     """Process-wide session cache."""
 
@@ -584,7 +1029,14 @@ class MCPClientManager:
     def _create_session(self, cfg: MCPServerConfig) -> Any:
         """Create session based on transport type."""
         transport = cfg.transport
-        if transport == "sse":
+        if transport == "streamable-http":
+            return MCPStreamableHttpSession(cfg)
+        elif transport == "sse":
+            logger.warning(
+                "MCP transport 'sse' is deprecated (Spec 2024-11-05). "
+                "Migrate to 'streamable-http' (Spec 2025-06-18). "
+                "See: https://modelcontextprotocol.io/specification/2025-06-18/basic/transports"
+            )
             return MCPSseSession(cfg)
         elif transport == "stdio":
             return MCPStdioSession(cfg)

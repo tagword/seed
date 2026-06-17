@@ -98,6 +98,7 @@ def list_server_configs(base: Optional[Path] = None) -> list[MCPServerConfig]:
                 command=str(entry.get("command") or "").strip(),
                 args=[str(x) for x in args] if isinstance(args, list) else [],
                 url=str(url).strip() if url else "",
+                headers={str(k): str(v) for k, v in entry.get("headers", {}).items()} if isinstance(entry.get("headers"), dict) else {},
                 env={str(k): str(v) for k, v in env.items()} if isinstance(env, dict) else {},
                 cwd=str(entry["cwd"]).strip() if entry.get("cwd") else None,
             )
