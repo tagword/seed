@@ -1127,8 +1127,10 @@ def reset_mcp_manager() -> None:
 
 def probe_mcp_server_config(cfg: MCPServerConfig) -> Dict[str, Any]:
     """Start a one-off session, list tools, then close (for Web UI test)."""
-    if cfg.transport == "sse":
-        sess: Any = MCPSseSession(cfg)
+    if cfg.transport == "streamable-http":
+        sess: Any = MCPStreamableHttpSession(cfg)
+    elif cfg.transport == "sse":
+        sess = MCPSseSession(cfg)
     else:
         sess = MCPStdioSession(cfg)
     try:
