@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from seed.integrations.mcp_client import MCPError, MCPStreamableHttpSession
+from seed.integrations.mcp_client import MCPClientManager, MCPError, MCPStreamableHttpSession
 from seed.integrations.mcp_config import MCPServerConfig
 
 
@@ -349,6 +349,100 @@ class TestListTools:
 
         with pytest.raises(MCPError, match="401"):
             sess.list_tools()
+
+
+class TestSkills:
+    def test_list_skills_falls_back_to_prompts(self, cfg: MCPServerConfig) -> None:
+        sess = MCPStreamableHttpSession(cfg)
+
+        def fake_request(method: str, params: Optional[Dict[str, Any]] = None, *, timeout: float = 60.0) -> Any:
+            if method == "skills/list":
+                raise MCPError("MCP error: {'code': -32601, 'message': 'Method not found'}")
+            assert method == "prompts/list"
+            return {
+                "prompts": [
+                    {
+                        "name": "summarize",
+                        "description": "Summarize text",
+                        "arguments": [{"name": "text", "required": True}],
+                    }
+                ]
+            }
+
+        sess._ready = True
+        sess._start = lambda: None  # type: ignore[method-assign]
+        sess._request = fake_request  # type: ignore[method-assign]
+
+        skills = sess.list_skills()
+        assert len(skills) == 1
+        assert skills[0].name == "summarize"
+        assert skills[0].arguments[0]["name"] == "text"
+
+    def test_call_skill_falls_back_to_prompt_get(self, cfg: MCPServerConfig) -> None:
+        sess = MCPStreamableHttpSession(cfg)
+
+        def fake_request(method: str, params: Optional[Dict[str, Any]] = None, *, timeout: float = 60.0) -> Any:
+            if method == "skills/call":
+                raise MCPError("MCP error: {'code': -32601, 'message': 'Method not found'}")
+            assert method == "prompts/get"
+            assert params == {"name": "summarize", "arguments": {"text": "hello"}}
+            return {
+                "messages": [
+                    {"role": "user", "content": {"type": "text", "text": "Summarize: hello"}}
+                ]
+            }
+
+        sess._ready = True
+        sess._start = lambda: None  # type: ignore[method-assign]
+        sess._request = fake_request  # type: ignore[method-assign]
+
+        out = sess.call_skill("summarize", {"text": "hello"})
+        assert "user: Summarize: hello" in out
+
+    def test_list_skills_falls_back_to_tools(self, cfg: MCPServerConfig) -> None:
+        sess = MCPStreamableHttpSession(cfg)
+
+        def fake_request(method: str, params: Optional[Dict[str, Any]] = None, *, timeout: float = 60.0) -> Any:
+            if method in ("skills/list", "prompts/list"):
+                raise MCPError("MCP error: {'code': -32601, 'message': 'Method not found'}")
+            assert method == "tools/list"
+            return {"tools": [{"name": "web_search", "description": "Search web"}]}
+
+        sess._ready = True
+        sess._start = lambda: None  # type: ignore[method-assign]
+        sess._request = fake_request  # type: ignore[method-assign]
+
+        skills = sess.list_skills()
+        assert skills[0].name == "web_search"
+
+    def test_call_skill_falls_back_to_tool_call(self, cfg: MCPServerConfig) -> None:
+        sess = MCPStreamableHttpSession(cfg)
+
+        def fake_request(method: str, params: Optional[Dict[str, Any]] = None, *, timeout: float = 60.0) -> Any:
+            if method in ("skills/call", "prompts/get"):
+                raise MCPError("MCP error: {'code': -32601, 'message': 'Method not found'}")
+            assert method == "tools/call"
+            assert params == {"name": "web_search", "arguments": {"query": "hello"}}
+            return {"content": [{"type": "text", "text": "search result"}]}
+
+        sess._ready = True
+        sess._start = lambda: None  # type: ignore[method-assign]
+        sess._request = fake_request  # type: ignore[method-assign]
+
+        assert sess.call_skill("web_search", {"query": "hello"}) == "search result"
+
+
+class TestStatus:
+    def test_streamable_http_ready_session_is_connected(self, cfg: MCPServerConfig) -> None:
+        manager = MCPClientManager()
+        sess = MCPStreamableHttpSession(cfg)
+        sess._ready = True
+        manager._sessions[cfg.server_id] = sess
+
+        with patch("seed.integrations.mcp_client.list_server_configs", return_value=[cfg]):
+            rows = manager.list_servers_status(probe=False)
+
+        assert rows[0]["connected"] is True
 
 
 # ------------------------------------------------------------------ #

@@ -35,6 +35,13 @@ class MCPToolInfo:
     input_schema: Dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class MCPSkillInfo:
+    name: str
+    description: str = ""
+    arguments: List[Dict[str, Any]] = field(default_factory=list)
+
+
 class MCPStdioSession:
     """One persistent stdio session to an MCP server subprocess."""
 
@@ -226,6 +233,16 @@ class MCPStdioSession:
                 timeout=timeout,
             )
         return _format_tool_result(result)
+
+    def list_skills(self) -> List[MCPSkillInfo]:
+        with self._lock:
+            self._start()
+            return _list_skills_via_request(self._request)
+
+    def call_skill(self, name: str, arguments: Optional[Dict[str, Any]] = None, *, timeout: float = 120.0) -> str:
+        with self._lock:
+            self._start()
+            return _call_skill_via_request(self._request, name, arguments or {}, timeout=timeout)
 
 
 class MCPSseSession:
@@ -523,6 +540,16 @@ class MCPSseSession:
             )
         return _format_tool_result(result)
 
+    def list_skills(self) -> List[MCPSkillInfo]:
+        with self._lock:
+            self._start()
+            return _list_skills_via_request(self._request)
+
+    def call_skill(self, name: str, arguments: Optional[Dict[str, Any]] = None, *, timeout: float = 120.0) -> str:
+        with self._lock:
+            self._start()
+            return _call_skill_via_request(self._request, name, arguments or {}, timeout=timeout)
+
     def close(self) -> None:
         self._close_flag.set()
         if self._client is not None:
@@ -572,6 +599,131 @@ def _extract_content_text(content: Any) -> str:
         elif isinstance(block, str):
             parts.append(block)
     return "\n".join(p for p in parts if p)
+
+
+def _is_method_not_found_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "-32601" in text or "method not found" in text or "not found" in text
+
+
+def _skill_info_from_entry(entry: Any) -> Optional[MCPSkillInfo]:
+    if not isinstance(entry, dict):
+        return None
+    name = str(entry.get("name") or "").strip()
+    if not name:
+        return None
+    raw_args = entry.get("arguments")
+    args: List[Dict[str, Any]] = []
+    if isinstance(raw_args, list):
+        args = [a for a in raw_args if isinstance(a, dict)]
+    return MCPSkillInfo(
+        name=name,
+        description=str(entry.get("description") or ""),
+        arguments=args,
+    )
+
+
+def _parse_skills_result(result: Any) -> List[MCPSkillInfo]:
+    if isinstance(result, dict):
+        raw = result.get("skills")
+        if raw is None:
+            raw = result.get("prompts")
+        if raw is None:
+            raw = result.get("tools")
+    elif isinstance(result, list):
+        raw = result
+    else:
+        raw = []
+    if not isinstance(raw, list):
+        return []
+    out: List[MCPSkillInfo] = []
+    for item in raw:
+        info = _skill_info_from_entry(item)
+        if info is not None:
+            out.append(info)
+    return out
+
+
+def _list_skills_via_request(request_fn: Any) -> List[MCPSkillInfo]:
+    try:
+        return _parse_skills_result(request_fn("skills/list", {}, timeout=30.0))
+    except MCPError as e:
+        if not _is_method_not_found_error(e):
+            raise
+    try:
+        return _parse_skills_result(request_fn("prompts/list", {}, timeout=30.0))
+    except MCPError as e:
+        if not _is_method_not_found_error(e):
+            raise
+    return _parse_skills_result(request_fn("tools/list", {}, timeout=30.0))
+
+
+def _format_prompt_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        ctype = str(content.get("type") or "").strip()
+        if ctype == "text":
+            return str(content.get("text") or "")
+        if "text" in content:
+            return str(content.get("text") or "")
+        return json.dumps(content, ensure_ascii=False, indent=2)
+    return json.dumps(content, ensure_ascii=False, indent=2)
+
+
+def _format_prompt_result(result: Any) -> str:
+    if not isinstance(result, dict):
+        return json.dumps(result, ensure_ascii=False, indent=2)
+    messages = result.get("messages")
+    if not isinstance(messages, list):
+        return _format_tool_result(result)
+    parts: List[str] = []
+    desc = str(result.get("description") or "").strip()
+    if desc:
+        parts.append(desc)
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        role = str(msg.get("role") or "user").strip() or "user"
+        text = _format_prompt_content(msg.get("content"))
+        if text:
+            parts.append(f"{role}: {text}")
+    return "\n\n".join(parts).strip() or json.dumps(result, ensure_ascii=False, indent=2)
+
+
+def _call_skill_via_request(
+    request_fn: Any,
+    name: str,
+    arguments: Dict[str, Any],
+    *,
+    timeout: float,
+) -> str:
+    try:
+        result = request_fn(
+            "skills/call",
+            {"name": name, "arguments": arguments},
+            timeout=timeout,
+        )
+        return _format_tool_result(result)
+    except MCPError as e:
+        if not _is_method_not_found_error(e):
+            raise
+    try:
+        result = request_fn(
+            "prompts/get",
+            {"name": name, "arguments": arguments},
+            timeout=timeout,
+        )
+        return _format_prompt_result(result)
+    except MCPError as e:
+        if not _is_method_not_found_error(e):
+            raise
+    result = request_fn(
+        "tools/call",
+        {"name": name, "arguments": arguments},
+        timeout=timeout,
+    )
+    return _format_tool_result(result)
 
 
 class MCPStreamableHttpSession:
@@ -1003,6 +1155,24 @@ class MCPStreamableHttpSession:
             )
         return _format_tool_result(result)
 
+    def list_skills(self) -> List[MCPSkillInfo]:
+        with self._lock:
+            self._start()
+            return _list_skills_via_request(self._request)
+
+    def call_skill(
+        self,
+        name: str,
+        arguments: Optional[Dict[str, Any]] = None,
+        *,
+        timeout: float = 120.0,
+    ) -> str:
+        with self._lock:
+            self._start()
+            return _call_skill_via_request(
+                self._request, name, arguments or {}, timeout=timeout
+            )
+
     def close(self) -> None:
         self._close_flag.set()
         if self._client is not None:
@@ -1086,7 +1256,7 @@ class MCPClientManager:
             with self._lock:
                 sess = self._sessions.get(cfg.server_id)
             if sess:
-                if cfg.transport == "sse":
+                if cfg.transport in ("sse", "streamable-http"):
                     row["connected"] = bool(sess._ready and not sess._close_flag.is_set())
                 else:
                     row["connected"] = bool(
@@ -1094,10 +1264,28 @@ class MCPClientManager:
                     )
             if probe and cfg.enabled and mcp_globally_enabled():
                 try:
-                    tools = self.get_session(cfg.server_id).list_tools()
+                    sess = self.get_session(cfg.server_id)
+                    tool_error = ""
+                    skill_error = ""
+                    try:
+                        tools = sess.list_tools()
+                    except Exception as e:
+                        tools = []
+                        tool_error = str(e)
+                    try:
+                        skills = sess.list_skills()
+                    except Exception as e:
+                        skills = []
+                        skill_error = str(e)
+                    if not tools and not skills and tool_error:
+                        raise MCPError(tool_error)
                     row["connected"] = True
                     row["tool_count"] = len(tools)
                     row["tools"] = [t.name for t in tools]
+                    row["skill_count"] = len(skills)
+                    row["skills"] = [s.name for s in skills]
+                    if skill_error:
+                        row["skill_error"] = skill_error
                 except Exception as e:
                     row["connected"] = False
                     row["last_error"] = str(e)
@@ -1134,11 +1322,27 @@ def probe_mcp_server_config(cfg: MCPServerConfig) -> Dict[str, Any]:
     else:
         sess = MCPStdioSession(cfg)
     try:
-        tools = sess.list_tools()
+        tool_error = ""
+        skill_error = ""
+        try:
+            tools = sess.list_tools()
+        except Exception as e:
+            tools = []
+            tool_error = str(e)
+        try:
+            skills = sess.list_skills()
+        except Exception as e:
+            skills = []
+            skill_error = str(e)
+        if not tools and not skills and tool_error:
+            raise MCPError(tool_error)
         return {
             "ok": True,
             "tool_count": len(tools),
             "tools": [t.name for t in tools],
+            "skill_count": len(skills),
+            "skills": [s.name for s in skills],
+            "skill_error": skill_error,
         }
     except Exception as e:
         return {"ok": False, "error": str(e)}

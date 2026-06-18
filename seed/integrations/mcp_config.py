@@ -16,9 +16,11 @@ MCP_CONFIG_FILENAME = "mcp.json"
 
 _DEFAULT_CONFIG: dict[str, Any] = {
     "_readme": (
-        "MCP servers for Seed/CodeAgent. Each entry under servers: id -> {enabled, transport, command, args, url, env, cwd}. "
-        "transport: stdio (local subprocess) or sse (HTTP SSE remote). "
-        "Tools: mcp_servers, mcp_list_tools, mcp_call."
+        "MCP servers for Seed/CodeAgent. Each entry under servers: id -> "
+        "{enabled, transport, command, args, url, headers, env, cwd}. "
+        "transport: stdio (local subprocess), sse (legacy HTTP SSE remote), "
+        "or streamable-http (recommended remote). "
+        "Tools: mcp_servers, mcp_list_tools, mcp_call, mcp_list_skills, mcp_skill."
     ),
     "servers": {},
 }
