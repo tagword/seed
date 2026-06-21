@@ -645,11 +645,7 @@ def _parse_skills_result(result: Any) -> List[MCPSkillInfo]:
 
 
 def _list_skills_via_request(request_fn: Any) -> List[MCPSkillInfo]:
-    try:
-        return _parse_skills_result(request_fn("skills/list", {}, timeout=30.0))
-    except MCPError as e:
-        if not _is_method_not_found_error(e):
-            raise
+    """List MCP prompts or tools exposed as WebUI "skills" (no non-standard skills/* RPC)."""
     try:
         return _parse_skills_result(request_fn("prompts/list", {}, timeout=30.0))
     except MCPError as e:
@@ -698,16 +694,6 @@ def _call_skill_via_request(
     *,
     timeout: float,
 ) -> str:
-    try:
-        result = request_fn(
-            "skills/call",
-            {"name": name, "arguments": arguments},
-            timeout=timeout,
-        )
-        return _format_tool_result(result)
-    except MCPError as e:
-        if not _is_method_not_found_error(e):
-            raise
     try:
         result = request_fn(
             "prompts/get",

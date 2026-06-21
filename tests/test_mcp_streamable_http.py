@@ -356,8 +356,6 @@ class TestSkills:
         sess = MCPStreamableHttpSession(cfg)
 
         def fake_request(method: str, params: Optional[Dict[str, Any]] = None, *, timeout: float = 60.0) -> Any:
-            if method == "skills/list":
-                raise MCPError("MCP error: {'code': -32601, 'message': 'Method not found'}")
             assert method == "prompts/list"
             return {
                 "prompts": [
@@ -382,8 +380,6 @@ class TestSkills:
         sess = MCPStreamableHttpSession(cfg)
 
         def fake_request(method: str, params: Optional[Dict[str, Any]] = None, *, timeout: float = 60.0) -> Any:
-            if method == "skills/call":
-                raise MCPError("MCP error: {'code': -32601, 'message': 'Method not found'}")
             assert method == "prompts/get"
             assert params == {"name": "summarize", "arguments": {"text": "hello"}}
             return {
@@ -403,7 +399,7 @@ class TestSkills:
         sess = MCPStreamableHttpSession(cfg)
 
         def fake_request(method: str, params: Optional[Dict[str, Any]] = None, *, timeout: float = 60.0) -> Any:
-            if method in ("skills/list", "prompts/list"):
+            if method == "prompts/list":
                 raise MCPError("MCP error: {'code': -32601, 'message': 'Method not found'}")
             assert method == "tools/list"
             return {"tools": [{"name": "web_search", "description": "Search web"}]}
@@ -419,7 +415,7 @@ class TestSkills:
         sess = MCPStreamableHttpSession(cfg)
 
         def fake_request(method: str, params: Optional[Dict[str, Any]] = None, *, timeout: float = 60.0) -> Any:
-            if method in ("skills/call", "prompts/get"):
+            if method == "prompts/get":
                 raise MCPError("MCP error: {'code': -32601, 'message': 'Method not found'}")
             assert method == "tools/call"
             assert params == {"name": "web_search", "arguments": {"query": "hello"}}

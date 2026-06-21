@@ -3,9 +3,11 @@ from __future__ import annotations
 
 
 from datetime import datetime, timezone
+import json
 import logging
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from seed.core.chat_events import is_chat_cancelled
 
@@ -172,13 +174,17 @@ DEFAULT_SYSTEM = """你是 CodeAgent：谨慎的编程与系统助手（此为�
 def registry_to_openai_tools(
     registry: ToolRegistry,
     *,
+    include_names: Optional[Sequence[str]] = None,
     exclude_prefixes: Optional[Sequence[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Build Chat Completions ``tools`` payload from a ``ToolRegistry``."""
     tools: List[Dict[str, Any]] = []
+    include_set = {n for n in (include_names or []) if n}
     # Stable ordering matters for cache-prefix reuse (e.g. DeepSeek KV cache).
     # Sort by tool name so plugin load order does not perturb the tools schema.
     for tool in sorted(registry.list_all(), key=lambda t: (t.name or "")):
+        if include_set and tool.name not in include_set:
+            continue
         if exclude_prefixes and any(
             tool.name.startswith(p) for p in exclude_prefixes if p
         ):
@@ -846,6 +852,26 @@ def _context_compact_enabled() -> bool:
     )
 
 
+def _context_compact_mid_loop_enabled() -> bool:
+    if not _context_compact_enabled():
+        return False
+    return _ea.pick_default("0", *_ea.CONTEXT_COMPACT_MID_LOOP).lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _context_compact_adaptive_keep_enabled() -> bool:
+    return _ea.pick_default("0", *_ea.CONTEXT_COMPACT_ADAPTIVE_KEEP).lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _api_prompt_tokens(
     messages: List[Dict[str, Any]],
     *,
@@ -863,6 +889,38 @@ def _api_prompt_tokens(
             if isinstance(pt, (int, float)) and int(pt) > 0:
                 return int(pt)
     return 0
+
+
+def resolve_compact_trigger_tokens(
+    *,
+    persisted: Optional[Dict[str, Any]] = None,
+    loop_meta: Optional[Dict[str, Any]] = None,
+    api_prompt_tokens: Optional[int] = None,
+) -> int:
+    """Best-effort compact trigger size from API usage (never local estimation).
+
+    Takes the maximum of explicit ``api_prompt_tokens``, persisted session
+    ``context_usage`` (``peak_prompt_tokens`` / ``prompt_tokens``), and the
+    in-flight ``loop_meta.peak_prompt_tokens``.
+    """
+    candidates: List[int] = []
+    if api_prompt_tokens is not None:
+        try:
+            pt = int(api_prompt_tokens)
+            if pt > 0:
+                candidates.append(pt)
+        except (TypeError, ValueError):
+            pass
+    if isinstance(persisted, dict):
+        for key in ("peak_prompt_tokens", "prompt_tokens"):
+            raw = persisted.get(key)
+            if isinstance(raw, (int, float)) and int(raw) > 0:
+                candidates.append(int(raw))
+    if isinstance(loop_meta, dict):
+        raw = loop_meta.get("peak_prompt_tokens")
+        if isinstance(raw, (int, float)) and int(raw) > 0:
+            candidates.append(int(raw))
+    return max(candidates) if candidates else 0
 
 
 def _record_peak_prompt_tokens(loop_meta: Dict[str, Any], meta: Optional[Dict[str, Any]]) -> None:
@@ -892,7 +950,7 @@ def _get_compact_min_tokens() -> int:
     Priority: runtime override > env var > default 30000.
     """
     global _compact_min_tokens_override
-    if _compact_min_tokens_override is not None and _compact_min_tokens_override > 0:
+    if _compact_min_tokens_override is not None:
         return _compact_min_tokens_override
     tok = _ea.pick_nonempty(*_ea.CONTEXT_COMPACT_MIN_TOKENS)
     if tok:
@@ -1069,6 +1127,125 @@ def _format_transcript_for_summary(chunks: List[Dict[str, Any]], max_chars: int)
     )
 
 
+def _get_compact_recent_max_chars() -> int:
+    """Character budget for the post-compact recent tail (0 disables)."""
+    raw = _ea.pick_default("120000", *_ea.CONTEXT_COMPACT_RECENT_MAX_CHARS)
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 120000
+
+
+def _messages_visible_chars(messages: List[Dict[str, Any]]) -> int:
+    from seed.core.llm_exec import msg_text_to_str
+
+    total = 0
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        total += len(str(message.get("role") or ""))
+        total += len(msg_text_to_str(message.get("content")))
+        if message.get("tool_calls"):
+            try:
+                total += len(json.dumps(message.get("tool_calls"), ensure_ascii=False))
+            except Exception:
+                total += len(str(message.get("tool_calls")))
+    return total
+
+
+def _compact_recent_message_for_projection(
+    message: Dict[str, Any],
+    *,
+    max_content_chars: int,
+) -> bool:
+    """Shrink one oversized recent-tail message in the API projection only."""
+    from seed.core.llm_exec import msg_text_to_str
+
+    content = msg_text_to_str(message.get("content"))
+    if len(content) <= max_content_chars:
+        return False
+
+    head_chars = max(1000, max_content_chars // 2)
+    tail_chars = max(1000, max_content_chars - head_chars)
+    if head_chars + tail_chars >= len(content):
+        return False
+
+    role = str(message.get("role") or "?")
+    name = str(message.get("name") or message.get("tool") or "").strip()
+    title = f"Role: {role}" + (f"\nName: {name}" if name else "")
+    replacement = (
+        "[Recent message compacted in API projection; persisted history keeps the full original]\n"
+        f"{title}\n"
+        f"Original content chars: {len(content)}\n"
+        "Reason: recent tail exceeded SEED_CONTEXT_COMPACT_RECENT_MAX_CHARS.\n\n"
+        "Head excerpt:\n"
+        f"{content[:head_chars].rstrip()}\n\n"
+        "...[middle omitted from projection]...\n\n"
+        "Tail excerpt:\n"
+        f"{content[-tail_chars:].lstrip()}"
+    )
+    message["content"] = replacement
+    message["_recent_tail_compacted"] = True
+    return True
+
+
+def _compact_recent_tail_for_projection(
+    recent: List[Dict[str, Any]],
+    *,
+    max_chars: int,
+) -> Dict[str, int]:
+    """Apply role-prioritized recent-tail shrinking to projection messages."""
+    before = _messages_visible_chars(recent)
+    if max_chars <= 0 or before <= max_chars:
+        return {"before": before, "after": before, "count": 0}
+
+    latest_user_idx = -1
+    for i, message in enumerate(recent):
+        if isinstance(message, dict) and message.get("role") == "user":
+            latest_user_idx = i
+
+    def _indices_for_role(role: str, *, include_latest_user: bool = True) -> List[int]:
+        idxs: List[int] = []
+        for i, message in enumerate(recent):
+            if not isinstance(message, dict) or message.get("role") != role:
+                continue
+            if role == "user" and not include_latest_user and i == latest_user_idx:
+                continue
+            idxs.append(i)
+        return sorted(
+            idxs,
+            key=lambda idx: len(str(recent[idx].get("content") or "")),
+            reverse=True,
+        )
+
+    compacted = 0
+    # Keep the latest user instruction as raw as possible; compact it only if
+    # tool/assistant/older-user shrinking still cannot satisfy the budget.
+    passes = [
+        (_indices_for_role("tool"), 12000),
+        (_indices_for_role("assistant"), 16000),
+        (_indices_for_role("user", include_latest_user=False), 24000),
+        ([latest_user_idx] if latest_user_idx >= 0 else [], 32000),
+    ]
+    for indices, per_message_max in passes:
+        if _messages_visible_chars(recent) <= max_chars:
+            break
+        for idx in indices:
+            if idx < 0 or idx >= len(recent):
+                continue
+            if _messages_visible_chars(recent) <= max_chars:
+                break
+            target_chars = min(per_message_max, max(1000, max_chars // 2))
+            if _compact_recent_message_for_projection(
+                recent[idx],
+                max_content_chars=target_chars,
+            ):
+                compacted += 1
+
+    after = _messages_visible_chars(recent)
+    return {"before": before, "after": after, "count": compacted}
+
+
 
 def _get_compact_summarizer_max_tokens() -> int:
     """Completion budget for compact summarizer calls (independent of ``SEED_LLM_MAX_TOKENS``)."""
@@ -1077,6 +1254,96 @@ def _get_compact_summarizer_max_tokens() -> int:
         return max(256, min(int(raw), 65536))
     except (TypeError, ValueError):
         return 4096
+
+
+def _default_compact_summarizer_system_prompt(sum_max_tok: int) -> str:
+    return (
+        "You compress prior agent chat for continuation. "
+        "Output structured bullet points in the same language as the transcript. "
+        "Preserve continuation-critical state: user goals, current task status, "
+        "files changed or inspected, shell commands, test results, error messages, "
+        "tool names used, decisions already made, blockers, and unresolved questions. "
+        "Prefer concise summaries, but do not make them so short that the next agent "
+        "would need to rediscover important context. "
+        "Do not invent facts.\n\n"
+        "TRANSIENT-FACT RULE (CRITICAL): Any runtime state that can change "
+        "silently — e.g. process PIDs, listening ports, 'running/stopped' "
+        "status, temp files, cwd, currently-open sessions — MUST be written "
+        "as a snapshot, not as a lasting fact. Format such lines like:\n"
+        "  - 『截至压缩时』PID 26364 监听 3001（需重新核对）\n"
+        "  - 『As of compression』port 3000 was listening on PID 18064 (re-verify before use)\n"
+        "Never write an unqualified 'PID X is running' / 'port Y is up' — "
+        "the downstream agent will treat that as current truth and skip "
+        "re-checking, which causes wrong conclusions when the process has "
+        "since died.\n\n"
+        "LENGTH POLICY: The hard generation budget is "
+        f"{sum_max_tok} tokens, configured by SEED_CONTEXT_COMPACT_SUMMARIZER_MAX_TOKENS. "
+        "Stay concise by default, but use the available budget when needed to preserve "
+        "critical continuation state."
+    )
+
+
+def _compact_summarizer_system_prompt(sum_max_tok: int) -> str:
+    """Load optional ``SEED_CONTEXT_COMPACT_SUMMARIZER_PROMPT_FILE`` or use the default."""
+    raw = _ea.pick_nonempty(*_ea.CONTEXT_COMPACT_SUMMARIZER_PROMPT_FILE)
+    if raw:
+        try:
+            path = Path(raw).expanduser()
+            if path.is_file():
+                text = path.read_text(encoding="utf-8").strip()
+                if text:
+                    return text.replace("{sum_max_tok}", str(sum_max_tok))
+        except Exception:
+            logger.debug("compact summarizer prompt file read failed", exc_info=True)
+    return _default_compact_summarizer_system_prompt(sum_max_tok)
+
+
+def _recent_tool_char_ratio(messages: List[Dict[str, Any]]) -> float:
+    from seed.core.llm_exec import msg_text_to_str
+
+    total = 0
+    tool_chars = 0
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "")
+        chars = len(msg_text_to_str(message.get("content")))
+        if message.get("tool_calls"):
+            try:
+                chars += len(json.dumps(message.get("tool_calls"), ensure_ascii=False))
+            except Exception:
+                chars += len(str(message.get("tool_calls")))
+        total += chars
+        if role == "tool":
+            tool_chars += chars
+    if total <= 0:
+        return 0.0
+    return tool_chars / total
+
+
+def effective_keep_user_rounds(
+    default_keep: int,
+    *,
+    trigger_tokens: int,
+    min_tokens: int,
+    recent_tool_char_ratio: float,
+) -> tuple[int, str]:
+    """Rule-based keep adjustment (never LLM). Returns ``(keep, reason)``."""
+    keep = max(1, int(default_keep))
+    reasons: List[str] = []
+    if not _context_compact_adaptive_keep_enabled():
+        return keep, ""
+    if trigger_tokens >= int(min_tokens * 1.5):
+        new_keep = max(1, keep - 1)
+        if new_keep < keep:
+            keep = new_keep
+            reasons.append("trigger>=1.5x_min")
+    if recent_tool_char_ratio >= 0.75:
+        new_keep = max(1, keep - 1)
+        if new_keep < keep:
+            keep = new_keep
+            reasons.append("tool_ratio>=0.75")
+    return keep, ",".join(reasons)
 
 
 def _coalesce_llm_visible_text(
@@ -1191,6 +1458,8 @@ def maybe_compact_context_messages(
     llm: LLMAPIExecutor,
     *,
     api_prompt_tokens: Optional[int] = None,
+    persisted_context_usage: Optional[Dict[str, Any]] = None,
+    loop_meta: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     If enabled and the message tail (excluding system) exceeds a token threshold,
@@ -1202,13 +1471,17 @@ def maybe_compact_context_messages(
     返回压缩信息字典（供调用者写回持久化消息），或 ``None``（未触发压缩）。
 
     Args:
-        api_prompt_tokens: If provided (from last API response or persisted
-            context_usage), used as the compact trigger. Required — no local
-            message token estimation.
+        api_prompt_tokens: Explicit trigger token count (e.g. current segment peak).
+        persisted_context_usage: Session ``metadata.context_usage`` dict.
+        loop_meta: In-flight tool-loop meta (``peak_prompt_tokens``).
+
+        Compact triggers when ``resolve_compact_trigger_tokens(...)`` exceeds
+        ``SEED_CONTEXT_COMPACT_MIN_TOKENS``. No local message estimation.
 
     Env (``CODEAGENT_*`` aliases still honored):
       SEED_CONTEXT_COMPACT=1
       SEED_CONTEXT_COMPACT_KEEP_USER_ROUNDS (default 3) — full turns to preserve
+      SEED_CONTEXT_COMPACT_RECENT_MAX_CHARS (default 120000) — recent tail projection budget
       SEED_CONTEXT_COMPACT_SUMMARIZER_BASEURL — dedicated summarizer URL (optional)
       SEED_CONTEXT_COMPACT_SUMMARIZER_MODEL   — dedicated summarizer model (optional)
       SEED_CONTEXT_SUMMARIZER_MAX_INPUT     (default 120000) — cap for summarizer input chars
@@ -1223,13 +1496,17 @@ def maybe_compact_context_messages(
         return None
 
     min_tokens = _get_compact_min_tokens()
+    if min_tokens <= 0:
+        return None
     keep_rounds = int(_ea.pick_default("3", *_ea.CONTEXT_COMPACT_KEEP_USER_ROUNDS))
+    recent_max_chars = _get_compact_recent_max_chars()
     max_in = int(_ea.pick_default("120000", *_ea.CONTEXT_SUMMARIZER_MAX_INPUT))
     if keep_rounds < 1:
         return None
 
-    cur_tokens = _api_prompt_tokens(
-        messages,
+    cur_tokens = resolve_compact_trigger_tokens(
+        persisted=persisted_context_usage,
+        loop_meta=loop_meta,
         api_prompt_tokens=api_prompt_tokens,
     )
     if cur_tokens <= 0:
@@ -1264,15 +1541,39 @@ def maybe_compact_context_messages(
         return None
 
     if len(user_idx) <= keep_rounds:
-        # 轮数很少但 token 超出阈值 → 压缩历史，保留最后 1 轮
-        effective_keep = max(1, len(user_idx) - 1)
+        base_keep = max(1, len(user_idx) - 1)
     else:
-        effective_keep = keep_rounds
+        base_keep = keep_rounds
+
+    recent_preview = body[user_idx[len(user_idx) - base_keep] :] if user_idx else body
+    tool_ratio = _recent_tool_char_ratio(recent_preview)
+    effective_keep, adaptive_reason = effective_keep_user_rounds(
+        base_keep,
+        trigger_tokens=cur_tokens,
+        min_tokens=min_tokens,
+        recent_tool_char_ratio=tool_ratio,
+    )
 
     cut = user_idx[len(user_idx) - effective_keep]
     old = body[:cut]
     recent = body[cut:]
     if not old:
+        recent_stats = _compact_recent_tail_for_projection(
+            recent,
+            max_chars=recent_max_chars,
+        )
+        if recent_stats["count"] > 0:
+            messages[:] = ([messages[0]] if has_system else []) + recent
+            emit_chat_event(
+                {
+                    "type": "context_recent_tail_compact",
+                    "compacted_messages": int(recent_stats["count"]),
+                    "recent_chars_before": int(recent_stats["before"]),
+                    "recent_chars_after": int(recent_stats["after"]),
+                    "recent_max_chars": int(recent_max_chars),
+                    "prompt_tokens_before": int(cur_tokens),
+                }
+            )
         return None
 
     # ── 增量摘要检测 ──
@@ -1293,27 +1594,12 @@ def maybe_compact_context_messages(
             + transcript
         )
 
+    sum_max_tok = _get_compact_summarizer_max_tokens()
+
     sum_messages: List[Dict[str, Any]] = [
         {
             "role": "system",
-            "content": (
-                "You compress prior agent chat for continuation. "
-                "Output concise bullet points in the same language as the transcript. "
-                "Preserve: file paths, shell commands, error messages, user goals, "
-                "tool names used, and unresolved questions. "
-                "Do not invent facts.\n\n"
-                "TRANSIENT-FACT RULE (CRITICAL): Any runtime state that can change "
-                "silently — e.g. process PIDs, listening ports, 'running/stopped' "
-                "status, temp files, cwd, currently-open sessions — MUST be written "
-                "as a snapshot, not as a lasting fact. Format such lines like:\n"
-                "  - 『截至压缩时』PID 26364 监听 3001（需重新核对）\n"
-                "  - 『As of compression』port 3000 was listening on PID 18064 (re-verify before use)\n"
-                "Never write an unqualified 'PID X is running' / 'port Y is up' — "
-                "the downstream agent will treat that as current truth and skip "
-                "re-checking, which causes wrong conclusions when the process has "
-                "since died.\n\n"
-                "Max ~800 Chinese characters or ~500 English words."
-            ),
+            "content": _compact_summarizer_system_prompt(sum_max_tok),
         },
         {
             "role": "user",
@@ -1331,11 +1617,11 @@ def maybe_compact_context_messages(
             sum_messages,
             kind="compact_summarizer",
             round_index=0,
+            tools=[],
             extra={"trigger": "maybe_compact_context_messages"},
         )
     except Exception:
         logger.debug("compact summarizer projection audit failed", exc_info=True)
-    sum_max_tok = _get_compact_summarizer_max_tokens()
     try:
         summary, _meta = summarizer.generate(
             sum_messages,
@@ -1390,15 +1676,26 @@ def maybe_compact_context_messages(
         "<<<END_SEED_COMPACT>>>\n"
     )
     sys_msg["content"] = base + block
+    recent_stats = _compact_recent_tail_for_projection(
+        recent,
+        max_chars=recent_max_chars,
+    )
     messages[:] = [sys_msg] + recent
     emit_chat_event(
         {
             "type": "context_compact",
             "dropped_messages": int(len(old)),
             "kept_user_rounds": int(effective_keep),
+            "effective_keep_user_rounds": int(effective_keep),
+            "adaptive_keep_reason": adaptive_reason,
             "summary_chars": int(len(combined)),
+            "recent_compacted_messages": int(recent_stats["count"]),
+            "recent_chars_before": int(recent_stats["before"]),
+            "recent_chars_after": int(recent_stats["after"]),
+            "recent_max_chars": int(recent_max_chars),
             "compact_min_tokens": int(min_tokens),
             "prompt_tokens_before": int(cur_tokens),
+            "update_agent_state_hint": True,
         }
     )
     logger.info(
@@ -1409,11 +1706,40 @@ def maybe_compact_context_messages(
 
     # ── 返回压缩信息供调用者写回 chat_sess.messages ──
     return {
-        "boundary_idx": body_start + cut - 1,  # 边界消息在投影 messages 中的索引
-        "boundary_source_idx": boundary_source_idx,  # 边界消息在 full_messages 中的索引
+        "boundary_idx": body_start + cut - 1,
+        "boundary_source_idx": boundary_source_idx,
         "compact_summary": combined,
         "dropped_count": len(old),
+        "effective_keep_user_rounds": int(effective_keep),
+        "adaptive_keep_reason": adaptive_reason,
     }
+
+
+def try_mid_loop_compact_if_needed(
+    messages: List[Dict[str, Any]],
+    llm: LLMAPIExecutor,
+    *,
+    loop_meta: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Compact during a tool loop when peak prompt tokens exceed the threshold."""
+    if not _context_compact_mid_loop_enabled():
+        return None
+    min_tokens = _get_compact_min_tokens()
+    if min_tokens <= 0:
+        return None
+    peak = int(loop_meta.get("peak_prompt_tokens") or 0)
+    if peak < min_tokens:
+        return None
+    result = maybe_compact_context_messages(
+        messages,
+        llm,
+        api_prompt_tokens=peak,
+        loop_meta=loop_meta,
+    )
+    if result is not None:
+        loop_meta["peak_prompt_tokens"] = 0
+        loop_meta["compact_count"] = int(loop_meta.get("compact_count") or 0) + 1
+    return result
 
 
 def _truncate_tool_output(text: str, *, tool_name: str = "tool") -> str:
@@ -1559,6 +1885,7 @@ async def run_llm_tool_loop(
     on_text_delta: Optional[Callable[[str], None]] = None,
     on_reasoning_delta: Optional[Callable[[str], None]] = None,
     on_check_pending_messages: Optional[Callable[[], List[Dict[str, Any]]]] = None,
+    on_compact: Optional[Callable[[Optional[Dict[str, Any]]], None]] = None,
     enable_thinking: Optional[bool] = None,
     reasoning_effort: Optional[str] = None,
 ) -> Tuple[str, Dict[str, Any], List[str], List[Dict[str, str]], Dict[str, Any]]:
@@ -1600,17 +1927,32 @@ async def run_llm_tool_loop(
                     # 处理新注入的用户消息，避免 pending 消息被忽略
                     continue
 
+            _audit_path = None
             try:
                 from seed.core.projection_audit import persist_llm_projection_audit
 
-                persist_llm_projection_audit(
+                _audit_path = persist_llm_projection_audit(
                     messages,
                     kind="chat",
                     round_index=round_i + 1,
+                    tools=tool_schema,
                     extra={"max_tool_rounds": int(max_tool_rounds)},
                 )
             except Exception:
                 logger.debug("chat projection audit failed", exc_info=True)
+            try:
+                from seed.core.trace_audit import append_trace_event
+
+                append_trace_event(
+                    "llm_request",
+                    round=round_i + 1,
+                    audit_file=_audit_path.name if _audit_path else "",
+                    message_count=len(messages),
+                    tools_count=len(tool_schema or []),
+                    max_tool_rounds=int(max_tool_rounds),
+                )
+            except Exception:
+                logger.debug("trace llm_request failed", exc_info=True)
 
             # --- Streaming LLM round (per-token) ---
             content, tool_calls, meta = await asyncio.to_thread(
@@ -1625,6 +1967,34 @@ async def run_llm_tool_loop(
             )
             last_meta = meta or {}
             _record_peak_prompt_tokens(loop_meta, last_meta)
+            try:
+                from seed.core.projection_audit import append_projection_audit_usage
+
+                _usage = last_meta.get("usage") if isinstance(last_meta, dict) else None
+                append_projection_audit_usage(
+                    _audit_path,
+                    _usage if isinstance(_usage, dict) else None,
+                    meta={
+                        "tool_calls": int(len(tool_calls or [])),
+                        "finish_reason": str(last_meta.get("finish_reason") or ""),
+                    },
+                )
+            except Exception:
+                logger.debug("chat projection audit usage append failed", exc_info=True)
+            try:
+                from seed.core.trace_audit import append_trace_event
+
+                _usage_for_trace = last_meta.get("usage") if isinstance(last_meta, dict) else None
+                append_trace_event(
+                    "llm_response",
+                    round=round_i + 1,
+                    audit_file=_audit_path.name if _audit_path else "",
+                    usage=_usage_for_trace if isinstance(_usage_for_trace, dict) else {},
+                    tool_calls=int(len(tool_calls or [])),
+                    finish_reason=str(last_meta.get("finish_reason") or ""),
+                )
+            except Exception:
+                logger.debug("trace llm_response failed", exc_info=True)
 
             assistant_msg: Dict[str, Any] = {"role": "assistant", "content": content}
             rc = last_meta.get("reasoning_content")
@@ -1633,6 +2003,18 @@ async def run_llm_tool_loop(
             if tool_calls:
                 assistant_msg["tool_calls"] = tool_calls
             messages.append(assistant_msg)
+
+            _compact_result = await asyncio.to_thread(
+                try_mid_loop_compact_if_needed,
+                messages,
+                llm,
+                loop_meta=loop_meta,
+            )
+            if _compact_result is not None and on_compact:
+                try:
+                    on_compact(_compact_result)
+                except Exception:
+                    logger.exception("on_compact callback failed")
 
             if not tool_calls:
                 _emit_context_usage_snapshot(
@@ -1681,6 +2063,19 @@ async def run_llm_tool_loop(
                     }
                 )
                 try:
+                    from seed.core.trace_audit import append_trace_event
+
+                    append_trace_event(
+                        "tool_start",
+                        round=round_i + 1,
+                        event_id=event_id,
+                        tool_call_id=tid,
+                        tool=name,
+                        arguments=raw_args,
+                    )
+                except Exception:
+                    logger.debug("trace tool_start failed", exc_info=True)
+                try:
                     try:
                         args_obj = json.loads(raw_args) if raw_args.strip() else {}
                     except json.JSONDecodeError:
@@ -1718,6 +2113,21 @@ async def run_llm_tool_loop(
                         "result": snippet,
                     }
                 )
+                try:
+                    from seed.core.trace_audit import append_trace_event
+
+                    append_trace_event(
+                        "tool_end",
+                        round=round_i + 1,
+                        event_id=event_id,
+                        tool_call_id=tid,
+                        tool=name,
+                        result_chars=len(out or ""),
+                        result_preview=snippet,
+                        cancelled=bool(loop_meta.get("stopped_reason") == "cancelled"),
+                    )
+                except Exception:
+                    logger.debug("trace tool_end failed", exc_info=True)
 
                 messages.append(
                     {

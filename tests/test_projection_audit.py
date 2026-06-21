@@ -15,6 +15,7 @@ from seed.core.agent_context import (
     set_active_project_episodic,
 )
 from seed.core.projection_audit import (
+    append_projection_audit_usage,
     load_projection_audit_snapshot,
     list_projection_audit_index,
     persist_llm_projection_audit,
@@ -56,3 +57,50 @@ def test_persist_and_load_roundtrip(audit_env: Path) -> None:
 
     raw = json.loads(path.read_text(encoding="utf-8"))
     assert raw["body_bytes"] > 0
+
+
+def test_persist_records_tools_and_usage(audit_env: Path) -> None:
+    msgs = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hello"},
+    ]
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "bash",
+                "description": "Run a shell command",
+                "parameters": {"type": "object"},
+            },
+        }
+    ]
+    path = persist_llm_projection_audit(
+        msgs,
+        kind="chat",
+        round_index=2,
+        tools=tools,
+        extra={"max_tool_rounds": 16},
+    )
+    assert path is not None and path.is_file()
+
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert raw["tools"] == tools
+    assert raw["tools_count"] == 1
+    assert raw["tools_bytes"] > 0
+    assert raw["request_bytes"] == raw["body_bytes"] + raw["tools_bytes"]
+
+    ok = append_projection_audit_usage(
+        path,
+        {"prompt_tokens": 123, "completion_tokens": 4, "total_tokens": 127},
+        meta={"tool_calls": 0, "finish_reason": "stop"},
+    )
+    assert ok is True
+
+    updated = json.loads(path.read_text(encoding="utf-8"))
+    assert updated["usage"]["prompt_tokens"] == 123
+    assert updated["post_call_meta"]["finish_reason"] == "stop"
+
+    rows = list_projection_audit_index("sess-audit-1", agent_id="test-agent")
+    assert rows[-1]["meta"]["max_tool_rounds"] == 16
+    assert rows[-1]["usage"]["prompt_tokens"] == 123
+    assert rows[-1]["post_call_meta"]["tool_calls"] == 0

@@ -7,12 +7,16 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from seed.core import agent_runtime
 from seed.core.agent_runtime import (
     build_api_projection_messages,
+    effective_keep_user_rounds,
     maybe_compact_context_messages,
     merge_llm_tail_into_full,
     persist_compact_summary,
+    resolve_compact_trigger_tokens,
     strip_ephemeral_message_fields,
+    try_mid_loop_compact_if_needed,
 )
 
 
@@ -34,6 +38,140 @@ def _llm(summary: str = "compressed summary") -> MagicMock:
     llm.api_key = "test"
     llm.auth_scheme = "Bearer"
     return llm
+
+
+def test_runtime_compact_min_tokens_zero_disables_without_changing_env(
+    seed_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(agent_runtime, "_compact_min_tokens_override", None)
+    monkeypatch.setenv("SEED_CONTEXT_COMPACT_MIN_TOKENS", "250")
+    full = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "u1" + ("x" * 800)},
+        {"role": "assistant", "content": "a1" + ("x" * 800)},
+        {"role": "user", "content": "u2" + ("x" * 800)},
+        {"role": "assistant", "content": "a2" + ("x" * 800)},
+    ]
+
+    agent_runtime.set_compact_min_tokens(0)
+    try:
+        result = maybe_compact_context_messages(
+            build_api_projection_messages(full),
+            _llm("summary"),
+            api_prompt_tokens=5000,
+        )
+        assert result is None
+    finally:
+        monkeypatch.setattr(agent_runtime, "_compact_min_tokens_override", None)
+
+
+def test_resolve_compact_trigger_tokens_prefers_peak() -> None:
+    assert resolve_compact_trigger_tokens(
+        persisted={"prompt_tokens": 4321, "peak_prompt_tokens": 45715},
+    ) == 45715
+    assert resolve_compact_trigger_tokens(
+        persisted={"prompt_tokens": 5000},
+        loop_meta={"peak_prompt_tokens": 12000},
+    ) == 12000
+    assert resolve_compact_trigger_tokens(
+        api_prompt_tokens=8000,
+        persisted={"prompt_tokens": 5000, "peak_prompt_tokens": 6000},
+    ) == 8000
+
+
+def test_compact_triggers_on_peak_when_last_prompt_below_min(seed_home: Path) -> None:
+    """Peak from prior run exceeds min even if last prompt_tokens was small."""
+    full = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "u1" + ("x" * 800)},
+        {"role": "assistant", "content": "a1" + ("x" * 800)},
+        {"role": "user", "content": "u2" + ("x" * 800)},
+        {"role": "assistant", "content": "a2" + ("x" * 800)},
+    ]
+    api = build_api_projection_messages(full)
+    result = maybe_compact_context_messages(
+        api,
+        _llm("peak summary"),
+        persisted_context_usage={"prompt_tokens": 4321, "peak_prompt_tokens": 45715},
+    )
+    assert result is not None
+    assert "peak summary" in api[0]["content"]
+    assert "<<<SEED_COMPACT>>>" in api[0]["content"]
+
+
+def test_effective_keep_user_rounds_adaptive(
+    seed_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SEED_CONTEXT_COMPACT_ADAPTIVE_KEEP", "1")
+    keep, reason = effective_keep_user_rounds(
+        2,
+        trigger_tokens=300,
+        min_tokens=250,
+        recent_tool_char_ratio=0.8,
+    )
+    assert keep == 1
+    assert "tool_ratio>=0.75" in reason
+
+
+def test_effective_keep_user_rounds_disabled_by_default(seed_home: Path) -> None:
+    keep, reason = effective_keep_user_rounds(
+        2,
+        trigger_tokens=5000,
+        min_tokens=250,
+        recent_tool_char_ratio=0.9,
+    )
+    assert keep == 2
+    assert reason == ""
+
+
+def test_compact_summarizer_prompt_file_override(
+    seed_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prompt_path = tmp_path / "custom_compact_prompt.md"
+    prompt_path.write_text("CUSTOM PROMPT budget={sum_max_tok}", encoding="utf-8")
+    monkeypatch.setenv("SEED_CONTEXT_COMPACT_SUMMARIZER_PROMPT_FILE", str(prompt_path))
+    text = agent_runtime._compact_summarizer_system_prompt(2048)
+    assert text == "CUSTOM PROMPT budget=2048"
+
+
+def test_try_mid_loop_compact_when_peak_exceeds_min(
+    seed_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SEED_CONTEXT_COMPACT_MID_LOOP", "1")
+    full = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "u1" + ("x" * 800)},
+        {"role": "assistant", "content": "a1" + ("x" * 800)},
+        {"role": "user", "content": "u2" + ("x" * 800)},
+        {"role": "assistant", "content": "a2" + ("x" * 800)},
+    ]
+    api = build_api_projection_messages(full)
+    loop_meta: dict = {"peak_prompt_tokens": 5000}
+    result = try_mid_loop_compact_if_needed(
+        api,
+        _llm("mid-loop summary"),
+        loop_meta=loop_meta,
+    )
+    assert result is not None
+    assert loop_meta["peak_prompt_tokens"] == 0
+    assert loop_meta["compact_count"] == 1
+    assert "<<<SEED_COMPACT>>>" in api[0]["content"]
+
+
+def test_try_mid_loop_compact_skipped_when_disabled(
+    seed_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SEED_CONTEXT_COMPACT_MID_LOOP", "0")
+    api = [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}]
+    loop_meta: dict = {"peak_prompt_tokens": 5000}
+    assert try_mid_loop_compact_if_needed(api, _llm("x"), loop_meta=loop_meta) is None
+    assert loop_meta["peak_prompt_tokens"] == 5000
 
 
 def test_persist_compact_summary_uses_boundary_source_idx(seed_home: Path) -> None:
@@ -74,6 +212,52 @@ def test_bytes_forced_compact_with_two_user_rounds(seed_home: Path) -> None:
     assert result["boundary_source_idx"] == 3
     assert persist_compact_summary(full, result) is True
     assert "forced summary" in full[3]["_compact_summary"]
+
+
+def test_recent_tail_compacts_when_single_user_round_is_too_large(
+    seed_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SEED_CONTEXT_COMPACT_RECENT_MAX_CHARS", "2000")
+    api = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "please inspect this output"},
+        {"role": "tool", "name": "bash", "content": "log-start\n" + ("x" * 8000) + "\nlog-end"},
+    ]
+
+    result = maybe_compact_context_messages(api, _llm("unused"), api_prompt_tokens=5000)
+
+    assert result is None
+    assert api[2]["role"] == "tool"
+    assert "Recent message compacted in API projection" in api[2]["content"]
+    assert "log-start" in api[2]["content"]
+    assert "log-end" in api[2]["content"]
+
+
+def test_recent_tail_compacts_after_history_summary(
+    seed_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SEED_CONTEXT_COMPACT_KEEP_USER_ROUNDS", "1")
+    monkeypatch.setenv("SEED_CONTEXT_COMPACT_RECENT_MAX_CHARS", "2000")
+    full = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "u2"},
+        {"role": "tool", "name": "bash", "content": "head\n" + ("y" * 8000) + "\ntail"},
+    ]
+    api = build_api_projection_messages(full)
+
+    result = maybe_compact_context_messages(api, _llm("history summary"), api_prompt_tokens=5000)
+
+    assert result is not None
+    assert api[0]["role"] == "system"
+    assert "history summary" in api[0]["content"]
+    assert api[-1]["role"] == "tool"
+    assert "Recent message compacted in API projection" in api[-1]["content"]
+    assert "head" in api[-1]["content"]
+    assert "tail" in api[-1]["content"]
 
 
 def test_auto_continue_nudge_counted_as_user_round_in_compress(seed_home: Path) -> None:

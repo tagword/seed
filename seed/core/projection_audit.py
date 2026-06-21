@@ -101,11 +101,16 @@ def _json_safe_copy(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         return out
 
 
+def _json_body_bytes(value: Any) -> int:
+    return len(json.dumps(value, ensure_ascii=False, default=str).encode("utf-8"))
+
+
 def persist_llm_projection_audit(
     messages: List[Dict[str, Any]],
     *,
     kind: str = "chat",
     round_index: int = 0,
+    tools: Optional[List[Dict[str, Any]]] = None,
     agent_id: Optional[str] = None,
     session_id: Optional[str] = None,
     project_id: Optional[str] = None,
@@ -151,9 +156,9 @@ def persist_llm_projection_audit(
     out_path = audit_dir / fname
 
     payload_messages = _json_safe_copy(messages)
-    body_bytes = len(
-        json.dumps(payload_messages, ensure_ascii=False, default=str).encode("utf-8")
-    )
+    body_bytes = _json_body_bytes(payload_messages)
+    payload_tools = _json_safe_copy(tools or []) if tools else []
+    tools_bytes = _json_body_bytes(payload_tools) if payload_tools else 0
     record: Dict[str, Any] = {
         "version": 1,
         "ts": datetime.now(timezone.utc).isoformat(),
@@ -165,8 +170,13 @@ def persist_llm_projection_audit(
         "project_id": pid or None,
         "message_count": len(payload_messages),
         "body_bytes": body_bytes,
+        "tools_count": len(payload_tools),
+        "tools_bytes": tools_bytes,
+        "request_bytes": body_bytes + tools_bytes,
         "messages": payload_messages,
     }
+    if payload_tools:
+        record["tools"] = payload_tools
     if extra:
         record["meta"] = dict(extra)
 
@@ -184,14 +194,72 @@ def persist_llm_projection_audit(
             "kind": k,
             "round": int(round_index),
             "body_bytes": body_bytes,
+            "tools_count": len(payload_tools),
+            "tools_bytes": tools_bytes,
+            "request_bytes": body_bytes + tools_bytes,
             "message_count": len(payload_messages),
         }
+        if extra:
+            index_line["meta"] = _json_safe_copy(extra)
         with (audit_dir / "index.jsonl").open("a", encoding="utf-8") as idx:
             idx.write(json.dumps(index_line, ensure_ascii=False) + "\n")
     except OSError as exc:
         logger.warning("projection audit write failed: %s", exc)
         return None
     return out_path
+
+
+def append_projection_audit_usage(
+    audit_path: Optional[Path],
+    usage: Optional[Dict[str, Any]],
+    *,
+    meta: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Attach post-call usage metadata to an audit snapshot."""
+    if not audit_path or not usage:
+        return False
+    path = Path(audit_path)
+    if not path.is_file():
+        return False
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(record, dict):
+            return False
+        record["usage"] = dict(usage)
+        if meta:
+            existing = record.get("post_call_meta")
+            merged = dict(existing) if isinstance(existing, dict) else {}
+            merged.update(meta)
+            record["post_call_meta"] = merged
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps(record, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        tmp.replace(path)
+
+        idx_path = path.parent / "index.jsonl"
+        if idx_path.is_file():
+            lines: List[str] = []
+            for line in idx_path.read_text(encoding="utf-8").splitlines():
+                raw = line.strip()
+                if not raw:
+                    continue
+                try:
+                    item = json.loads(raw)
+                except json.JSONDecodeError:
+                    lines.append(line)
+                    continue
+                if isinstance(item, dict) and item.get("file") == path.name:
+                    item["usage"] = dict(usage)
+                    if meta:
+                        item["post_call_meta"] = dict(meta)
+                lines.append(json.dumps(item, ensure_ascii=False))
+            idx_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("projection audit usage append failed: %s", exc)
+        return False
+    return True
 
 
 def list_projection_audit_index(
