@@ -713,17 +713,19 @@ def _call_skill_via_request(
 
 
 class MCPStreamableHttpSession:
-    """MCP client session over Streamable HTTP transport (Spec 2025-06-18).
+    """MCP client session over Streamable HTTP transport (Spec 2025-11-25).
 
-    Uses a single MCP endpoint for both sending requests and receiving responses.
-    Synchronous responses arrive directly in the HTTP POST response body.
-    Optional SSE streaming for server-push notifications.
+    Uses a single MCP endpoint for sending JSON-RPC requests via HTTP POST.
+    Synchronous responses arrive directly in the POST response body.
+    For streaming operations the server may respond with ``text/event-stream``
+    (SSE scoped to that request).
 
-    Key differences from the deprecated HTTP+SSE (``MCPSseSession``):
-    - Single endpoint URL (no separate SSE/POST URLs)
+    Key spec compliance points (vs deprecated HTTP+SSE):
     - ``MCP-Protocol-Version`` header on all requests
-    - sessionId extracted from ``initialize`` response ``_meta.sessionId``
-    - SSE connection is optional (only for streaming subscriptions)
+    - ``Accept`` header listing ``application/json, text/event-stream``
+    - ``MCP-Session-Id`` header extracted from initialize HTTP response
+    - Session termination via HTTP DELETE on ``close()``
+    - Protocol version negotiated from server's ``InitializeResult``
     """
 
     # Latest protocol version for Streamable HTTP transport
@@ -741,6 +743,8 @@ class MCPStreamableHttpSession:
         self.cfg = cfg
         self._url = cfg.url.strip().rstrip("/")
         self._session_id: Optional[str] = None
+        self._negotiated_version: str = self._PROTOCOL_VERSION_HTTP
+        self._last_resp_headers: Any = None  # last HTTP response headers (for sessionId extraction)
         self._lock = threading.Lock()
         self._response_lock = threading.Lock()
         self._req_id = 0
@@ -748,7 +752,6 @@ class MCPStreamableHttpSession:
         self._results: Dict[int, Any] = {}
         self._ready = False
         self._client: Any = None  # httpx.Client
-        self._sse_thread: Optional[threading.Thread] = None
         self._close_flag = threading.Event()
 
     # ------------------------------------------------------------------ #
@@ -761,8 +764,8 @@ class MCPStreamableHttpSession:
             import httpx
 
             hdrs = {}
-            # MCP-Protocol-Version header (required by Streamable HTTP spec)
-            hdrs["MCP-Protocol-Version"] = self._PROTOCOL_VERSION_HTTP
+            # Accept header: client MUST list both supported content types (spec)
+            hdrs["Accept"] = "application/json, text/event-stream"
             if self.cfg.headers:
                 # User-defined headers (e.g. Authorization) override defaults
                 hdrs.update(self.cfg.headers)
@@ -780,104 +783,22 @@ class MCPStreamableHttpSession:
         return self._client
 
     def _headers(self) -> Dict[str, str]:
-        """Return per-request extra headers (content-type + optional session)."""
-        h: Dict[str, str] = {"Content-Type": "application/json"}
+        """Return per-request extra headers for each POST.
+
+        Includes:
+        - Content-Type: application/json
+        - Accept: both JSON and SSE (spec MUST)
+        - MCP-Protocol-Version: the negotiated version
+        - MCP-Session-Id: if session is established
+        """
+        h: Dict[str, str] = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": self._negotiated_version,
+        }
         if self._session_id:
             h["MCP-Session-Id"] = self._session_id
         return h
-
-    # ------------------------------------------------------------------ #
-    #  SSE reader (optional — for server-push notifications)
-    # ------------------------------------------------------------------ #
-
-    def _parse_sse_event(self, line: str) -> tuple[Optional[str], Optional[str]]:
-        """Parse a single SSE line. Returns (event_type, data) or (None, None)."""
-        line = line.strip()
-        if not line:
-            return None, None
-        if line.startswith("event:"):
-            return line[len("event:") :].strip(), None
-        if line.startswith("data:"):
-            return None, line[len("data:") :].strip()
-        if line.startswith("event "):
-            return line[len("event ") :].strip(), None
-        if line.startswith("data "):
-            return None, line[len("data ") :].strip()
-        return None, None
-
-    def _handle_sse_event(self, event: str, data: str) -> None:
-        """Handle a single SSE event from the stream."""
-        if event == "message":
-            try:
-                msg = json.loads(data)
-            except json.JSONDecodeError:
-                logger.warning(
-                    "MCP Streamable HTTP %s: bad JSON in SSE message",
-                    self.cfg.server_id,
-                )
-                return
-            rid = msg.get("id")
-            if rid is not None:
-                with self._response_lock:
-                    self._results[rid] = msg
-                    ev = self._pending.get(rid)
-                if ev:
-                    ev.set()
-        # Other event types are logged for debugging
-        elif event:
-            logger.debug(
-                "MCP Streamable HTTP %s: unhandled SSE event %r",
-                self.cfg.server_id,
-                event,
-            )
-
-    def _sse_reader(self) -> None:
-        """Background thread: read SSE stream and dispatch messages."""
-        try:
-            client = self._http_client()
-            with client.stream("GET", self._url) as response:
-                if response.status_code != 200:
-                    logger.error(
-                        "MCP Streamable HTTP %s: SSE GET %s returned %d",
-                        self.cfg.server_id,
-                        self._url,
-                        response.status_code,
-                    )
-                    return
-                current_event: Optional[str] = None
-                data_lines: list[str] = []
-
-                for chunk in response.iter_lines():
-                    if self._close_flag.is_set():
-                        break
-                    line = chunk.strip()
-                    if not line:
-                        # Empty line = event boundary
-                        if current_event is not None and data_lines:
-                            self._handle_sse_event(
-                                current_event, "\n".join(data_lines)
-                            )
-                        current_event = None
-                        data_lines = []
-                        continue
-
-                    if line.startswith("event:"):
-                        current_event = line[len("event:") :].strip()
-                    elif line.startswith("data:"):
-                        data_lines.append(line[len("data:") :].strip())
-                    # SSE comments (starting with :) are ignored
-
-                # Handle last event if no trailing blank line
-                if current_event is not None and data_lines:
-                    self._handle_sse_event(current_event, "\n".join(data_lines))
-
-        except Exception as e:
-            if not self._close_flag.is_set():
-                logger.error(
-                    "MCP Streamable HTTP %s SSE reader error: %s",
-                    self.cfg.server_id,
-                    e,
-                )
 
     # ------------------------------------------------------------------ #
     #  Initialization
@@ -905,9 +826,17 @@ class MCPStreamableHttpSession:
         if not isinstance(result, dict):
             raise MCPError("initialize returned invalid result")
 
-        # Extract sessionId from _meta (Streamable HTTP spec)
-        meta = result.get("_meta") or {}
-        sid = meta.get("sessionId")
+        # Protocol version negotiation: use the version the server responded with
+        negotiated = result.get("protocolVersion")
+        if negotiated:
+            self._negotiated_version = str(negotiated).strip()
+
+        # Extract sessionId from MCP-Session-Id HTTP response header (spec)
+        sid = (
+            self._last_resp_headers.get("MCP-Session-Id")
+            if self._last_resp_headers is not None
+            else None
+        )
         if sid:
             self._session_id = str(sid).strip()
             logger.info(
@@ -969,6 +898,7 @@ class MCPStreamableHttpSession:
 
         client = self._http_client()
         resp = client.post(self._url, json=payload, headers=self._headers())
+        self._last_resp_headers = resp.headers
 
         if resp.status_code >= 400:
             raise MCPError(
@@ -1160,6 +1090,23 @@ class MCPStreamableHttpSession:
             )
 
     def close(self) -> None:
+        """Close the session.
+
+        Sends HTTP DELETE to terminate the session on the server (spec
+        §Session Management), then cleans up local state.
+        """
+        # Send HTTP DELETE to terminate the session (Streamable HTTP spec)
+        if self._session_id and self._client is not None:
+            try:
+                self._client.delete(
+                    self._url,
+                    headers={
+                        "MCP-Session-Id": self._session_id,
+                        "Accept": "application/json, text/event-stream",
+                    },
+                )
+            except Exception:
+                pass
         self._close_flag.set()
         if self._client is not None:
             try:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import threading
 from typing import Any, Dict, Optional
 from unittest.mock import MagicMock, patch
 
@@ -108,12 +107,18 @@ def _mock_sse_response(
 
 
 class TestHttpClient:
-    def test_client_has_protocol_version_header(self, cfg: MCPServerConfig) -> None:
-        """HTTP client has MCP-Protocol-Version header."""
+    def test_client_has_accept_header(self, cfg: MCPServerConfig) -> None:
+        """HTTP client has Accept header listing both content types."""
         sess = MCPStreamableHttpSession(cfg)
         client = sess._http_client()
-        headers = client.headers
-        assert headers.get("MCP-Protocol-Version") == "2025-11-25"
+        assert client.headers.get("Accept") == "application/json, text/event-stream"
+
+    def test_per_request_headers_include_protocol_version(self, cfg: MCPServerConfig) -> None:
+        """Per-request _headers() includes MCP-Protocol-Version and Accept."""
+        sess = MCPStreamableHttpSession(cfg)
+        h = sess._headers()
+        assert h.get("MCP-Protocol-Version") == "2025-11-25"
+        assert h.get("Accept") == "application/json, text/event-stream"
 
     def test_client_has_custom_headers(self, cfg: MCPServerConfig) -> None:
         """Custom headers from config are included."""
@@ -136,13 +141,13 @@ class TestHttpClient:
 class TestInitialize:
     @patch("httpx.Client")
     def test_initialize_success(self, mock_client_cls: MagicMock, cfg: MCPServerConfig) -> None:
-        """Successful initialize extracts sessionId from _meta."""
+        """Successful initialize extracts sessionId from MCP-Session-Id HTTP header."""
         mock_client = MagicMock()
         mock_client_cls.return_value = mock_client
 
         sess = MCPStreamableHttpSession(cfg)
 
-        # Mock initialize response
+        # Mock initialize response — sessionId goes in HTTP header per spec
         init_result = {
             "jsonrpc": "2.0",
             "id": 1,
@@ -150,10 +155,11 @@ class TestInitialize:
                 "protocolVersion": "2025-11-25",
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": "test-mcp", "version": "1.0"},
-                "_meta": {"sessionId": "sess-abc-123"},
             },
         }
-        mock_client.post.return_value = _mock_response(init_result)
+        init_resp = _mock_response(init_result)
+        init_resp.headers["MCP-Session-Id"] = "sess-abc-123"
+        mock_client.post.return_value = init_resp
 
         # Trigger initialize via _start
         sess._start()
@@ -170,6 +176,11 @@ class TestInitialize:
         payload = first_call[1].get("json", {})
         assert payload["method"] == "initialize"
         assert payload["params"]["protocolVersion"] == "2025-11-25"
+
+        # Verify per-request headers include Accept and MCP-Protocol-Version
+        call_headers = first_call[1].get("headers", {})
+        assert call_headers.get("Accept") == "application/json, text/event-stream"
+        assert call_headers.get("MCP-Protocol-Version") == "2025-11-25"
 
         # Verify initialized notification was sent
         second_call = mock_client.post.call_args_list[1]
@@ -486,43 +497,52 @@ class TestClose:
 
 
 # ------------------------------------------------------------------ #
-#  SSE reader (background thread)
+#  close — DELETE session termination
 # ------------------------------------------------------------------ #
 
 
-class TestSseReader:
+class TestSessionTermination:
+    """Test session termination via HTTP DELETE (spec §Session Management)."""
+
     @patch("httpx.Client")
-    def test_sse_reader_dispatches_message(
+    def test_close_sends_delete_when_session_active(
         self, mock_client_cls: MagicMock, cfg: MCPServerConfig
     ) -> None:
-        """Background SSE reader dispatches message events."""
+        """close() sends HTTP DELETE with MCP-Session-Id when session is active."""
         mock_client = MagicMock()
         mock_client_cls.return_value = mock_client
 
         sess = MCPStreamableHttpSession(cfg)
+        # Trigger httpx client creation + set session state
+        sess._http_client()
+        sess._session_id = "sess-abc"
+        sess._ready = True
 
-        # Mock the SSE streaming response
-        msg_data = json.dumps({"jsonrpc": "2.0", "id": 99, "result": {"ok": True}})
-        sse_lines = [
-            "event:message",
-            f"data:{msg_data}",
-            "",  # blank line
-        ]
-        sse_resp = MagicMock()
-        sse_resp.status_code = 200
-        sse_resp.headers = {"content-type": "text/event-stream"}
-        sse_resp.iter_lines = MagicMock(return_value=sse_lines)
+        mock_delete = MagicMock()
+        mock_client.delete = mock_delete
 
-        mock_client.stream.return_value.__enter__.return_value = sse_resp
+        sess.close()
 
-        # Setup a pending event to verify dispatch
-        ev = threading.Event()
-        sess._pending[99] = ev
+        # Verify DELETE was sent
+        mock_delete.assert_called_once()
+        call_url = mock_delete.call_args[0][0]
+        call_headers = mock_delete.call_args[1].get("headers", {})
+        assert call_url == "http://localhost:9999/mcp"
+        assert call_headers.get("MCP-Session-Id") == "sess-abc"
+        assert not sess._ready
+        assert sess._client is None
 
-        # Manually run _sse_reader
-        sess._sse_reader()
+    @patch("httpx.Client")
+    def test_close_skips_delete_without_session(
+        self, mock_client_cls: MagicMock, cfg: MCPServerConfig
+    ) -> None:
+        """close() does not send DELETE when no session ID (stateless server)."""
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
 
-        # The event should have been set
-        assert ev.is_set()
-        assert sess._results.get(99) is not None
-        assert sess._results[99]["result"]["ok"] is True
+        sess = MCPStreamableHttpSession(cfg)
+        sess._ready = True
+        sess._session_id = None
+
+        sess.close()
+        mock_client.delete.assert_not_called()
