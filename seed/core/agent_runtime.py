@@ -795,6 +795,8 @@ def merge_llm_tail_into_full(
                 and tail[0].get("role") == "assistant"):
             persisted = dict(tail[0])
             strip_ephemeral_message_fields([persisted])
+            if "ts" not in persisted or not persisted["ts"]:
+                persisted["ts"] = datetime.now(timezone.utc).isoformat()
             full_messages[-1] = persisted
             tail = tail[1:]
         if tail:
@@ -805,6 +807,9 @@ def merge_llm_tail_into_full(
                     continue
                 copied = dict(message)
                 strip_ephemeral_message_fields([copied])
+                # 确保每条消息都带时间戳，刷新后历史时间显示
+                if "ts" not in copied or not copied["ts"]:
+                    copied["ts"] = datetime.now(timezone.utc).isoformat()
                 persisted_tail.append(copied)
             full_messages.extend(persisted_tail)
     return tail
