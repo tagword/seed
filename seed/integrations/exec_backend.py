@@ -341,6 +341,12 @@ def _run_local(command: str, timeout: int, cwd: Path, detach: bool = False) -> T
         )
 
     try:
+        # Windows: 显式指定 UTF-8 + errors='replace' 防止 GBK 解码崩溃
+        # （npx / pip 等子进程输出 UTF-8 内容时，GBK 解码会抛 UnicodeDecodeError）
+        sub_kw = {}
+        if os.name == "nt":
+            sub_kw["encoding"] = "utf-8"
+            sub_kw["errors"] = "replace"
         result = subprocess.run(
             command,
             shell=True,
@@ -349,6 +355,7 @@ def _run_local(command: str, timeout: int, cwd: Path, detach: bool = False) -> T
             timeout=timeout,
             cwd=str(cwd),
             **_windows_no_window_kwargs(),
+            **sub_kw,
         )
         output = (result.stdout or "") + (result.stderr or "")
         return result.returncode, output
