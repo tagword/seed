@@ -506,6 +506,7 @@ def _session_meta_from_json(
                 break
     display_title = _session_display_title(preview, meta)
     channel = _infer_channel(sid, meta, cfg)
+    context_usage = meta.get("context_usage")
     return {
         "session_id": sid,
         "file_id": str(data.get("id") or path.stem),
@@ -514,6 +515,7 @@ def _session_meta_from_json(
         "preview": preview,
         "display_title": display_title,
         "channel": channel,
+        "context_usage": context_usage,
         "project_id": str(meta.get("project_id") or "").strip(),
     }
 
@@ -585,6 +587,7 @@ def _meta_row_from_cache(
             "preview": str(cached_meta.get("preview") or "")[:120],
             "display_title": str(cached_meta.get("display_title") or "未命名对话")[:80],
             "channel": str(cached_meta.get("channel") or "Web 聊天")[:48],
+            "context_usage": cached_meta.get("context_usage"),
             "project_id": project_id,
         }
     # 缓存缺失，回退加载 JSON
@@ -802,6 +805,9 @@ def _extract_session_meta(session: Session) -> Dict[str, Any]:
         channel = session.metadata.get("channel") or session.metadata.get("source")
         if isinstance(channel, str) and channel.strip():
             meta["channel"] = channel.strip()[:48]
+        cu = session.metadata.get("context_usage")
+        if isinstance(cu, dict) and cu:
+            meta["context_usage"] = cu
     if not meta.get("display_title"):
         # 从最后一条 user 消息提取预览
         preview = ""
