@@ -9,12 +9,15 @@ Requires APScheduler: ``pip install apscheduler``.
 from __future__ import annotations
 
 
+import asyncio
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from seed.core import env_access as _ea
+from seed.core._session_cache import SESSIONS, _memkey
 
 logger = logging.getLogger(__name__)
 
@@ -171,18 +174,6 @@ def _tools_for_agent(_aid: str):
     return setup_builtin_tools()
 
 
-
-
-"""APScheduler wiring + cron config persistence."""
-
-import asyncio
-import json
-import logging
-from typing import Any, Dict, List, Optional
-
-
-logger = logging.getLogger(__name__)
-
 _scheduler: Optional[Any] = None
 
 
@@ -303,10 +294,12 @@ async def _run_cron_job_async(job: Dict[str, Any]) -> None:
         reg, exe = _tools_for_agent(agent_id)
         n_before = len(api_msgs)
         # ── single run (no continuation loop — cron interval handles retriggering) ──
+        cron_max_rounds = max(1, int(job.get("max_tool_rounds") or 16))
         reply, __, tools_used, tool_trace, _loop_meta = await run_llm_tool_loop(
             llm, exe,
             messages=api_msgs,
             registry=reg,
+            max_tool_rounds=cron_max_rounds,
         )
         tail = merge_llm_tail_into_full(chat_sess.messages, api_msgs, n_before)
         try:
@@ -594,17 +587,6 @@ def cron_status_for_ui() -> Dict[str, Any]:
     return out
 
 
-
-import asyncio
-import logging
-from datetime import datetime, timezone
-from typing import Any, Dict, List
-
-from seed.core._session_cache import SESSIONS, _memkey
-
-logger = logging.getLogger(__name__)
-
-
 def run_cron_job_sync(job: Dict[str, Any]) -> None:
     """Execute one cron job: one LLM+tools turn, persist session, sync in-memory SESSIONS."""
     if not job.get("enabled", True):
@@ -716,11 +698,13 @@ def run_cron_job_sync(job: Dict[str, Any]) -> None:
         reg, exe = _tools_for_agent(agent_id)
         n_before = len(api_msgs)
         # ── single run (no continuation loop — cron interval handles retriggering) ──
+        cron_max_rounds = max(1, int(job.get("max_tool_rounds") or 16))
         reply, __, tools_used, tool_trace, _loop_meta = asyncio.run(
             run_llm_tool_loop(
                 llm, exe,
                 messages=api_msgs,
                 registry=reg,
+                max_tool_rounds=cron_max_rounds,
             )
         )
         tail = merge_llm_tail_into_full(chat_sess.messages, api_msgs, n_before)
