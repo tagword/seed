@@ -632,6 +632,7 @@ _AUTO_CONTINUE_NUDGE_PREFIXES = (
 _EPHEMERAL_MESSAGE_KEYS = (
     "_source_idx",
     "_auto_continue_nudge",
+    "_streaming",
 )
 
 
