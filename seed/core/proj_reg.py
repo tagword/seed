@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS session_meta (
     preview       TEXT DEFAULT '',
     channel       TEXT DEFAULT '',
     context_usage TEXT DEFAULT '{}',
+    archived      INTEGER DEFAULT 0,
     PRIMARY KEY (project_id, session_id),
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
@@ -76,6 +77,11 @@ def _get_conn(agent_id: str) -> sqlite3.Connection:
             conn = sqlite3.connect(str(db), check_same_thread=False)
             conn.row_factory = sqlite3.Row
             conn.executescript(_SCHEMA_SQL)
+            # 增量迁移：现有 DB 添加 archived 列
+            try:
+                conn.execute("ALTER TABLE session_meta ADD COLUMN archived INTEGER DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass  # 列已存在
             _connections[agent_id] = conn
         return _connections[agent_id]
 
@@ -443,6 +449,42 @@ def unregister_session(agent_id: str, project_id: str, session_id: str) -> bool:
             (now, pid),
         )
     return True
+
+
+def archive_session(agent_id: str, project_id: str, session_id: str) -> bool:
+    """将会话标记为已归档（软删除），列表查询不再返回。"""
+    pid = (project_id or "").strip()
+    if not pid:
+        pid = UNASSIGNED_PROJECT_ID
+    sid = (session_id or "").strip()
+    if not sid:
+        return False
+    conn = _get_conn(agent_id)
+    now = _utc_iso()
+    cur = conn.execute(
+        "UPDATE session_meta SET archived = 1, updated_at = ? WHERE project_id = ? AND session_id = ?",
+        (now, pid, sid),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def unarchive_session(agent_id: str, project_id: str, session_id: str) -> bool:
+    """恢复已归档的会话（撤销归档）。"""
+    pid = (project_id or "").strip()
+    if not pid:
+        pid = UNASSIGNED_PROJECT_ID
+    sid = (session_id or "").strip()
+    if not sid:
+        return False
+    conn = _get_conn(agent_id)
+    now = _utc_iso()
+    cur = conn.execute(
+        "UPDATE session_meta SET archived = 0, updated_at = ? WHERE project_id = ? AND session_id = ?",
+        (now, pid, sid),
+    )
+    conn.commit()
+    return cur.rowcount > 0
 
 
 # ── 查询 ─────────────────────────────────────────────────────────
