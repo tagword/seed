@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from seed.core.agent_runtime import strip_ephemeral_message_fields
 from seed.core.models import Session
 
 
@@ -21,6 +22,11 @@ class SessionStore:
     def save_session(self, session: Session) -> None:
         self.base_path.mkdir(parents=True, exist_ok=True)
         path = self.base_path / f"{session.id}.json"
+
+        # Defensive strip: ensure no ephemeral fields (_streaming etc.) ever
+        # leak to disk, regardless of what races the upper layers created.
+        strip_ephemeral_message_fields(session.messages)
+
         payload: Dict[str, Any] = {
             "id": session.id,
             "name": session.name,
