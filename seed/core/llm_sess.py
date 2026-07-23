@@ -895,8 +895,6 @@ def delete_stored_session(
     Bug fix: 当 project_id 为空时，会话可能同时存在于主目录（stub, 298B）
     和 projects-data/<pid>/sessions/（真实数据）中。此函数会一并清理干净。
     """
-    from seed.core.proj_reg import list_projects, unregister_session
-
     aid = (agent_id or "").strip() or agent_id_default()
     pid = (project_id or "").strip() if project_id else ""
     slug = _safe_session_filename(handle)
@@ -934,8 +932,9 @@ def delete_stored_session(
         proj_pid = str(proj.get("id") or "").strip()
         if not proj_pid:
             continue
-        registered = proj.get("sessions", {})
-        if handle not in registered:
+        # 查询 session_meta 表（而非 projects 表的 sessions 列——该列不存在）
+        meta = list_project_sessions_meta(aid, proj_pid)
+        if handle not in meta:
             continue
         # 删除项目目录下的真实文件
         p = _project_sessions_dir(proj_pid, aid) / f"{slug}.json"

@@ -150,8 +150,9 @@ def generate(
         "messages": copy.deepcopy(api_messages),
         "max_tokens": eff_max,
         "temperature": self.temperature if temperature is None else temperature,
-        "top_p": self.topP,
     }
+    if not _ea.any_nonempty(*_ea.LLM_NO_TOP_P):
+        params["top_p"] = self.topP
     if not _ea.any_nonempty(*_ea.LLM_NO_TOPK):
         params["top_k"] = self.topK
 
@@ -427,11 +428,12 @@ def generate_stream(
         "messages": copy.deepcopy(api_messages),
         "max_tokens": eff_max,
         "temperature": self.temperature if temperature is None else temperature,
-        "top_p": self.topP,
-        "stream": True,
     }
+    if not _ea.any_nonempty(*_ea.LLM_NO_TOP_P):
+        params["top_p"] = self.topP
     if not _ea.any_nonempty(*_ea.LLM_NO_TOPK):
         params["top_k"] = self.topK
+    params["stream"] = True
 
     if tools:
         params["tools"] = tools
