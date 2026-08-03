@@ -546,3 +546,134 @@ class TestSessionTermination:
 
         sess.close()
         mock_client.delete.assert_not_called()
+
+
+class TestReconnect:
+    """Auto-reconnect when the MCP HTTP server restarts / invalidates the session."""
+
+    _INIT_RESULT = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "test-mcp", "version": "1.0"},
+        },
+    }
+
+    def _init_resp(self) -> MagicMock:
+        r = _mock_response(self._INIT_RESULT)
+        r.headers["MCP-Session-Id"] = "sess-abc-123"
+        return r
+
+    @patch("httpx.Client")
+    def test_reconnect_after_connection_failure(
+        self, mock_client_cls: MagicMock, cfg: MCPServerConfig
+    ) -> None:
+        """Server restarted (connection refused) → auto re-initialize + retry succeeds."""
+        import httpx
+
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+        sess = MCPStreamableHttpSession(cfg)
+
+        tools_resp = _mock_response(
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "result": {
+                    "tools": [{"name": "t1", "description": "d", "inputSchema": {}}]
+                },
+            }
+        )
+
+        # initialize 连接被拒（服务器重启）→ 重连 initialize → initialized → tools/list
+        mock_client.post.side_effect = [
+            httpx.ConnectError("connection refused"),
+            self._init_resp(),
+            _mock_response({}),  # notifications/initialized
+            tools_resp,
+        ]
+
+        tools = sess.list_tools()
+
+        assert sess._ready
+        assert sess._session_id == "sess-abc-123"
+        assert [t.name for t in tools] == ["t1"]
+        assert mock_client.post.call_count == 4
+
+    @patch("httpx.Client")
+    def test_reconnect_on_404_session_invalid(
+        self, mock_client_cls: MagicMock, cfg: MCPServerConfig
+    ) -> None:
+        """Server invalidated session (404 without MCP-Session-Id) → re-initialize + retry."""
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+        sess = MCPStreamableHttpSession(cfg)
+
+        not_found = _mock_response({"jsonrpc": "2.0", "id": 2}, status=404)
+        # 无 MCP-Session-Id 响应头 = 会话失效信号
+
+        tools_resp = _mock_response(
+            {"jsonrpc": "2.0", "id": 4, "result": {"tools": []}}
+        )
+
+        mock_client.post.side_effect = [
+            self._init_resp(),      # 首次 initialize
+            _mock_response({}),     # notifications/initialized
+            not_found,              # tools/list → 404 会话失效
+            self._init_resp(),      # 重连 initialize
+            _mock_response({}),     # notifications/initialized
+            tools_resp,             # tools/list 重试成功
+        ]
+
+        tools = sess.list_tools()
+
+        assert sess._ready
+        assert sess._session_id == "sess-abc-123"
+        assert tools == []
+        assert mock_client.post.call_count == 6
+
+    @patch("httpx.Client")
+    def test_no_reconnect_on_generic_http_error(
+        self, mock_client_cls: MagicMock, cfg: MCPServerConfig
+    ) -> None:
+        """Generic HTTP error (401) is NOT treated as stale → no reconnect, raises."""
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+        sess = MCPStreamableHttpSession(cfg)
+
+        mock_client.post.side_effect = [
+            self._init_resp(),
+            _mock_response({}),  # notifications/initialized
+            _mock_response({"error": "unauthorized"}, status=401),
+        ]
+
+        with pytest.raises(MCPError, match="401"):
+            sess.list_tools()
+        # 无重试：仅 3 次 POST
+        assert mock_client.post.call_count == 3
+
+    @patch("httpx.Client")
+    def test_stale_resets_session_state(
+        self, mock_client_cls: MagicMock, cfg: MCPServerConfig
+    ) -> None:
+        """Stale detection clears session id / ready flag so next call re-initializes."""
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+        sess = MCPStreamableHttpSession(cfg)
+
+        not_found = _mock_response({"jsonrpc": "2.0", "id": 2}, status=404)
+
+        # 先成功 initialize，再触发 404
+        mock_client.post.side_effect = [
+            self._init_resp(),
+            _mock_response({}),
+            not_found,
+        ]
+
+        with pytest.raises(MCPError):
+            sess.list_tools()
+
+        assert not sess._ready
+        assert sess._session_id is None

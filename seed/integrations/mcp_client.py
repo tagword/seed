@@ -24,6 +24,14 @@ class MCPError(Exception):
     pass
 
 
+class _StaleSessionError(MCPError):
+    """Internal: session is stale (server restarted / session invalidated server-side).
+
+    Callers inside the session catch this, reconnect (re-initialize), and retry
+    the operation once.
+    """
+
+
 def mcp_globally_enabled() -> bool:
     return env_truthy(*MCP_ENABLED, default="1")
 
@@ -92,6 +100,7 @@ class MCPStdioSession:
                 env=env,
                 cwd=cwd,
                 text=True,
+                encoding="utf-8",
                 bufsize=1,
             )
         except OSError as e:
@@ -804,6 +813,36 @@ class MCPStreamableHttpSession:
     #  Initialization
     # ------------------------------------------------------------------ #
 
+    def _mark_stale(self) -> None:
+        """Mark the session as stale so the next call re-initializes.
+
+        Triggered when the server restarted (connection failure / timeout) or
+        invalidated the session server-side (404 with empty MCP-Session-Id).
+        Callers are expected to already hold ``self._lock`` (as do
+        ``list_tools``/``call_tool``/...). Never acquires ``self._lock`` itself
+        to avoid a deadlock on re-entrant calls.
+        """
+        self._ready = False
+        self._session_id = None
+        with self._response_lock:
+            for ev in self._pending.values():
+                ev.set()
+            self._pending.clear()
+            self._results.clear()
+
+    def _run_with_reconnect(self, fn, *args, **kwargs) -> Any:
+        """Ensure the session is connected, run ``fn``; on stale-session failure,
+        re-initialize and retry once.
+
+        Caller must already hold ``self._lock``.
+        """
+        try:
+            self._start()
+            return fn(*args, **kwargs)
+        except _StaleSessionError:
+            self._start()
+            return fn(*args, **kwargs)
+
     def _start(self) -> None:
         """Connect and initialize the session (lazy, called on first use)."""
         if self._ready:
@@ -897,10 +936,28 @@ class MCPStreamableHttpSession:
         }
 
         client = self._http_client()
-        resp = client.post(self._url, json=payload, headers=self._headers())
+        try:
+            resp = client.post(self._url, json=payload, headers=self._headers())
+        except Exception as e:
+            # Connection refused / reset / timeout: the server likely restarted.
+            self._mark_stale()
+            raise _StaleSessionError(
+                f"MCP Streamable HTTP {self.cfg.server_id}: connection failed "
+                f"(server may have restarted): {e}"
+            ) from e
         self._last_resp_headers = resp.headers
 
         if resp.status_code >= 400:
+            # Streamable HTTP spec: 404 with empty MCP-Session-Id means the
+            # server no longer knows this session (restart / expiry) — reconnect.
+            if resp.status_code == 404 and not (
+                resp.headers.get("MCP-Session-Id") or ""
+            ).strip():
+                self._mark_stale()
+                raise _StaleSessionError(
+                    f"MCP Streamable HTTP {self.cfg.server_id}: session no longer "
+                    f"valid (server restarted?) — reconnecting"
+                )
             raise MCPError(
                 f"MCP Streamable HTTP {self.cfg.server_id}: "
                 f"POST {self._url} returned {resp.status_code}: {resp.text[:200]}"
@@ -965,11 +1022,14 @@ class MCPStreamableHttpSession:
             except MCPError:
                 raise
             except Exception as e:
+                # Stream interrupted mid-SSE (e.g. server restarted): reconnect.
                 with self._response_lock:
                     self._pending.pop(rid, None)
                     self._results.pop(rid, None)
-                raise MCPError(
-                    f"MCP Streamable HTTP SSE request failed: {e}"
+                self._mark_stale()
+                raise _StaleSessionError(
+                    f"MCP Streamable HTTP {self.cfg.server_id}: "
+                    f"SSE stream failed (server restarted?): {e}"
                 ) from e
             finally:
                 with self._response_lock:
@@ -1030,8 +1090,9 @@ class MCPStreamableHttpSession:
 
     def list_tools(self) -> List[MCPToolInfo]:
         with self._lock:
-            self._start()
-            result = self._request("tools/list", {}, timeout=30.0)
+            result = self._run_with_reconnect(
+                lambda: self._request("tools/list", {}, timeout=30.0)
+            )
         tools_raw = []
         if isinstance(result, dict):
             tools_raw = result.get("tools") or []
@@ -1063,18 +1124,20 @@ class MCPStreamableHttpSession:
         timeout: float = 120.0,
     ) -> str:
         with self._lock:
-            self._start()
-            result = self._request(
-                "tools/call",
-                {"name": name, "arguments": arguments or {}},
-                timeout=timeout,
+            result = self._run_with_reconnect(
+                lambda: self._request(
+                    "tools/call",
+                    {"name": name, "arguments": arguments or {}},
+                    timeout=timeout,
+                )
             )
         return _format_tool_result(result)
 
     def list_skills(self) -> List[MCPSkillInfo]:
         with self._lock:
-            self._start()
-            return _list_skills_via_request(self._request)
+            return self._run_with_reconnect(
+                lambda: _list_skills_via_request(self._request)
+            )
 
     def call_skill(
         self,
@@ -1084,9 +1147,10 @@ class MCPStreamableHttpSession:
         timeout: float = 120.0,
     ) -> str:
         with self._lock:
-            self._start()
-            return _call_skill_via_request(
-                self._request, name, arguments or {}, timeout=timeout
+            return self._run_with_reconnect(
+                lambda: _call_skill_via_request(
+                    self._request, name, arguments or {}, timeout=timeout
+                )
             )
 
     def close(self) -> None:
