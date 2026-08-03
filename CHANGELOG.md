@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.14 (unreleased)
+
+- fix(mcp): Streamable HTTP 会话自动重连 — 服务器重启/会话失效（连接失败、404 无 MCP-Session-Id、SSE 流中断）后自动重新 initialize 并重试一次
+- test: 新增 MCP Streamable HTTP 重连测试 4 例
+
 ## 1.0.13 (2026-07-24)
 
 - fix: `delete_stored_session` 错误查询 projects 表不存在的 sessions 列→改为查询 session_meta 表
