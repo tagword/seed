@@ -523,10 +523,67 @@ def shutdown_cron_scheduler() -> None:
     _scheduler = None
 
 
-def reload_cron_scheduler() -> None:
-    """Re-read cron JSON (``seed.cron.json`` or legacy ``codeagent.cron.json``) and rebuild APScheduler."""
+# 进程主事件循环：由服务入口（如 codeagent app_factory 的 lifespan）注册。
+# 用于在无 running loop 的 worker 线程（agent 工具执行环境）安全触发 reload。
+_main_loop: Optional[Any] = None
+
+
+def register_main_loop(loop: Optional[Any] = None) -> None:
+    """Record the process main event loop (must be called from inside that loop)."""
+    global _main_loop
+    if loop is not None:
+        _main_loop = loop
+        return
+    try:
+        _main_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        _main_loop = None
+
+
+def _reload_now() -> None:
     shutdown_cron_scheduler()
     start_cron_scheduler()
+
+
+async def _reload_async() -> None:
+    _reload_now()
+
+
+def reload_cron_scheduler() -> str:
+    """Re-read cron JSON and rebuild APScheduler. Thread-safe.
+
+    优先在当前线程的 running loop 上执行（服务内调用）；否则调度到进程
+    主事件循环（``register_main_loop`` 注册）上执行，保证 agent 工具在
+    worker 线程也能真正热更新；两者都不可用时**安全失败**——绝不先
+    shutdown 再失败，避免 ``AsyncIOScheduler.start()`` 因 ``no running
+    event loop`` 抛错把现有调度器打成停摆。
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        _reload_now()
+        return "reloaded"
+
+    loop = _main_loop
+    if loop is not None and not loop.is_closed():
+        if not loop.is_running():
+            logger.error("cron: reload skipped — main loop not running")
+            return "error: main loop not running"
+        try:
+            fut = asyncio.run_coroutine_threadsafe(_reload_async(), loop)
+            fut.result(timeout=10)
+            return "reloaded (via main loop)"
+        except Exception as e:
+            logger.exception("cron: reload via main loop failed")
+            return f"error: {e}"
+
+    logger.error(
+        "cron: reload skipped — no running event loop in this thread and no active "
+        "main loop; scheduler left untouched"
+    )
+    return "error: no running event loop available"
 
 
 def write_cron_config(data: Dict[str, Any]) -> None:
