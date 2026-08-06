@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- fix(cron): `CronTrigger.from_crontab` 的 day-of-week 数字语义修正 — APScheduler 按 Python weekday 约定解析（0=Monday），与标准 crontab（0/7=Sunday）不一致，导致 `0 9 * * 0` 在周一而非周日触发。新增 `_convert_crontab_dow` 将第 5 字段从标准 crontab 语义转换为 APScheduler 语义（数字映射 + 范围/列表/步进展开 + 文本名保留）
+- fix(cron): `save_cron_job` 保留 `max_tool_rounds` 字段（此前 UI 保存任务会丢失该配置）
+- test: 新增 tests/test_cron_dow_semantics.py（14 用例）
+
 ## 1.0.15 (2026-08-06)
 
 - fix(core): `$WORKSPACE` 变量改为基于进程 cwd 解析（而非 agent root），与运行时工作目录保持一致
