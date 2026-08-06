@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.16 (2026-08-06)
 
 - fix(cron): `reload_cron_scheduler()` 线程安全化 — 优先在当前线程 running loop 执行；否则通过 `run_coroutine_threadsafe` 调度到 `register_main_loop()` 注册的进程主循环；两者都不可用时安全失败，**不再先 shutdown 后失败**（此前 agent 工具在无 loop 的 worker 线程调用会把运行中的调度器打成停摆）
 - fix(cron): `CronTrigger.from_crontab` 的 day-of-week 数字语义修正 — APScheduler 按 Python weekday 约定解析（0=Monday），与标准 crontab（0/7=Sunday）不一致，导致 `0 9 * * 0` 在周一而非周日触发。新增 `_convert_crontab_dow` 将第 5 字段从标准 crontab 语义转换为 APScheduler 语义（数字映射 + 范围/列表/步进展开 + 文本名保留）
