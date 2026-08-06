@@ -1,6 +1,6 @@
 [project]
 name = "seed-kernel"
-version = "1.0.14"
+version = "1.0.15"
 description = "Seed — agent kernel (seed.core) and integrations (seed.integrations)"
 requires-python = ">=3.9"
 license = { text = "MIT" }

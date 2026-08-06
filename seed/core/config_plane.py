@@ -375,7 +375,7 @@ def _build_seed_vars_dict(agent_id: str, root: Path) -> dict[str, str]:
 
     return {
         "AGENT_ID": agent_id,
-        "WORKSPACE": str(root.resolve()),
+        "WORKSPACE": str(Path.cwd().resolve()),
         "AGENT_HOME": str(agent_home(agent_id, base=root)),
         "AGENT_SKILLS": str(agent_skills_dir(agent_id, base=root)),
         "AGENT_MEMORY": str(agent_memory_dir(agent_id, base=root)),

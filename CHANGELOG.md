@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.15 (2026-08-06)
+
+- fix(core): `$WORKSPACE` 变量改为基于进程 cwd 解析（而非 agent root），与运行时工作目录保持一致
+
 ## 1.0.14 (2026-08-03)
 
 - fix(mcp): Streamable HTTP 会话自动重连 — 服务器重启/会话失效（连接失败、404 无 MCP-Session-Id、SSE 流中断）后自动重新 initialize 并重试一次
