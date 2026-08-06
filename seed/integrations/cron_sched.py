@@ -159,6 +159,66 @@ def cron_job_id_is_active(jid: str) -> bool:
     return True
 
 
+# APScheduler 3.x 的 ``CronTrigger.from_crontab`` 会把 day-of-week 字段原样透传给
+# ``DayOfWeekField``，而后者遵循 Python weekday 约定（0=Monday … 6=Sunday）。
+# 这与标准 crontab 语义（0/7=Sunday … 6=Saturday）不一致：配置 ``0 9 * * 0`` 会在
+# 周一而不是周日触发。这里把第 5 个字段从标准 crontab 语义转换为 APScheduler 语义。
+# 文本名（sun/mon/…）两种语义一致，保留原样；数字一律展开为显式列表，
+# 避免范围回绕（如 crontab ``0-5`` = Sun-Fri 不能直接写成 APS 的 ``6-4``）。
+_CRONTAB_DOW_TO_APS: Dict[int, int] = {
+    0: 6,  # Sunday
+    1: 0,  # Monday
+    2: 1,  # Tuesday
+    3: 2,  # Wednesday
+    4: 3,  # Thursday
+    5: 4,  # Friday
+    6: 5,  # Saturday
+    7: 6,  # Sunday（部分 crontab 实现支持 7）
+}
+
+
+def _dow_token_to_aps(token: str) -> str:
+    """Convert a single crontab day-of-week token to APScheduler semantics."""
+    body, _, step = token.partition("/")
+    if body == "*":
+        if not step:
+            return token
+        # */n: expand over crontab day range (0..7) then map
+        nums = list(range(0, 8, int(step)))
+        mapped = [str(_CRONTAB_DOW_TO_APS[n]) for n in nums if n in _CRONTAB_DOW_TO_APS]
+        return ",".join(mapped) or token
+    if body.isdigit():
+        if not step:
+            # 单个数字：直接映射（0→6 周日, 1→0 周一, …）
+            n = int(body)
+            return str(_CRONTAB_DOW_TO_APS[n]) if n in _CRONTAB_DOW_TO_APS else token
+        # "N/step": 从 N 起步进到 crontab 域末尾（0..7）再映射
+        nums = list(range(int(body), 8, int(step)))
+        mapped = [str(_CRONTAB_DOW_TO_APS[n]) for n in nums if n in _CRONTAB_DOW_TO_APS]
+        return ",".join(mapped) or token
+    if "-" in body:
+        lo, _, hi = body.partition("-")
+        lo, hi = lo.strip(), hi.strip()
+        if lo.isdigit() and hi.isdigit():
+            nums = list(range(int(lo), int(hi) + 1, int(step) if step else 1))
+            mapped = [str(_CRONTAB_DOW_TO_APS[n]) for n in nums if n in _CRONTAB_DOW_TO_APS]
+            return ",".join(mapped) or token
+        # 文本范围（mon-fri）或混合：APScheduler 与 crontab 文本语义一致，原样保留
+        return token
+    return token
+
+
+def _convert_crontab_dow(expr: str) -> str:
+    """Map standard crontab day-of-week (0/7 = Sunday) to APScheduler (0 = Monday)."""
+    fields = expr.split()
+    if len(fields) != 5:
+        return expr
+    fields[4] = ",".join(
+        _dow_token_to_aps(tok) for tok in fields[4].split(",") if tok.strip()
+    )
+    return " ".join(fields)
+
+
 def _cron_disabled_by_env() -> bool:
     return _ea.pick_default("1", *_ea.CRON).lower() in (
         "0",
@@ -301,7 +361,7 @@ async def _run_cron_job_async(job: Dict[str, Any]) -> None:
             registry=reg,
             max_tool_rounds=cron_max_rounds,
         )
-        tail = merge_llm_tail_into_full(chat_sess.messages, api_msgs, n_before)
+        merge_llm_tail_into_full(chat_sess.messages, api_msgs, n_before)
         try:
             await asyncio.to_thread(persist_chat_session, chat_sess, agent_id)
         except Exception:
@@ -432,7 +492,7 @@ def start_cron_scheduler() -> None:
 
             tz = ZoneInfo("UTC")
         try:
-            trigger = CronTrigger.from_crontab(expr, timezone=tz)
+            trigger = CronTrigger.from_crontab(_convert_crontab_dow(expr), timezone=tz)
         except Exception as e:
             logger.warning("cron job %s: invalid cron %r: %s", jid, expr, e)
             continue
@@ -497,6 +557,12 @@ def save_cron_job(job: Dict[str, Any]) -> None:
     }
     if job.get("timezone"):
         entry["timezone"] = str(job.get("timezone") or "").strip()
+    mtr = job.get("max_tool_rounds")
+    if mtr is not None:
+        try:
+            entry["max_tool_rounds"] = int(mtr)
+        except (TypeError, ValueError):
+            pass
     pid = str(job.get("project_id") or "").strip()
     if pid:
         entry["project_id"] = pid
@@ -707,7 +773,7 @@ def run_cron_job_sync(job: Dict[str, Any]) -> None:
                 max_tool_rounds=cron_max_rounds,
             )
         )
-        tail = merge_llm_tail_into_full(chat_sess.messages, api_msgs, n_before)
+        merge_llm_tail_into_full(chat_sess.messages, api_msgs, n_before)
         try:
             persist_chat_session(chat_sess, agent_id)
         except Exception:
