@@ -236,6 +236,9 @@ def _tools_for_agent(_aid: str):
 
 _scheduler: Optional[Any] = None
 
+# Last cron scheduler startup error (visible via cron_status_for_ui). None = no error.
+cron_startup_error: Optional[str] = None
+
 
 async def _run_cron_job_async(job: Dict[str, Any]) -> None:
     """Execute one cron job fully async — shares the main event loop (no asyncio.run)."""
@@ -426,8 +429,14 @@ async def _run_cron_job_async(job: Dict[str, Any]) -> None:
 
 
 def start_cron_scheduler() -> None:
-    """Start APScheduler from disk config (no-op if disabled or apscheduler missing)."""
-    global _scheduler
+    """Start APScheduler from disk config (no-op if disabled or apscheduler missing).
+
+    Any failure is recorded in :data:`cron_startup_error` (surfaced through
+    :func:`cron_status_for_ui`) so a silently dead scheduler is visible in the
+    Web UI instead of disappearing into a log line.
+    """
+    global _scheduler, cron_startup_error
+    cron_startup_error = None
     if _scheduler is not None:
         return
     if _cron_disabled_by_env():
@@ -463,9 +472,10 @@ def start_cron_scheduler() -> None:
         from apscheduler.schedulers.asyncio import AsyncIOScheduler
         from apscheduler.triggers.cron import CronTrigger
     except ImportError:
-        logger.warning(
-            "cron: APScheduler unexpectedly unavailable; scheduled jobs will not run."
+        cron_startup_error = (
+            "APScheduler unexpectedly unavailable; scheduled jobs will not run."
         )
+        logger.warning("cron: %s", cron_startup_error)
         return
 
     sched = AsyncIOScheduler()
@@ -507,7 +517,12 @@ def start_cron_scheduler() -> None:
         )
         logger.info("cron: registered job id=%s cron=%r tz=%s", jid, expr, tz_name)
 
-    sched.start()
+    try:
+        sched.start()
+    except Exception as e:
+        cron_startup_error = f"scheduler start failed: {e}"
+        logger.exception("cron: %s", cron_startup_error)
+        return
     _scheduler = sched
     logger.info("cron: scheduler started (%s job(s))", len(sched.get_jobs()))
 
@@ -698,6 +713,8 @@ def cron_status_for_ui() -> Dict[str, Any]:
         "scheduler_running": _scheduler is not None,
         "scheduled_jobs": [],
     }
+    if cron_startup_error:
+        out["startup_error"] = cron_startup_error
     if _scheduler is not None:
         for j in _scheduler.get_jobs():
             nr = getattr(j, "next_run_time", None)
