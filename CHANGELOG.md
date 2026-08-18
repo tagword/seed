@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.17 (2026-08-18)
+
+- fix(cron): 调度器启动失败不再静默 — 新增模块级 `cron_startup_error`，`start_cron_scheduler()` 失败（APScheduler 缺失 / `sched.start()` 异常）时记录，`cron_status_for_ui()` 返回 `startup_error` 字段，Web UI 可直接看到调度器未运行/失败原因（此前失败只进日志，cron 无声停摆）
+- fix(cron): `save_cron_job` 保留 `max_continuations` 字段（此前 UI 保存任务会丢失该配置）
+- fix(cron): `cron_status_for_ui()` 回显 `max_tool_rounds` / `max_continuations`（此前 UI 编辑已有任务时轮数/续接段数静默回退默认值，如 30→12）
+- chore: 同步三处版本号（pyproject / seed/__init__ / seed/core/__init__）统一为 1.0.17
+
 ## 1.0.16 (2026-08-06)
 
 - fix(cron): `reload_cron_scheduler()` 线程安全化 — 优先在当前线程 running loop 执行；否则通过 `run_coroutine_threadsafe` 调度到 `register_main_loop()` 注册的进程主循环；两者都不可用时安全失败，**不再先 shutdown 后失败**（此前 agent 工具在无 loop 的 worker 线程调用会把运行中的调度器打成停摆）
