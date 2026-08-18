@@ -635,6 +635,12 @@ def save_cron_job(job: Dict[str, Any]) -> None:
             entry["max_tool_rounds"] = int(mtr)
         except (TypeError, ValueError):
             pass
+    mcr = job.get("max_continuations")
+    if mcr is not None:
+        try:
+            entry["max_continuations"] = int(mcr)
+        except (TypeError, ValueError):
+            pass
     pid = str(job.get("project_id") or "").strip()
     if pid:
         entry["project_id"] = pid
@@ -698,6 +704,8 @@ def cron_status_for_ui() -> Dict[str, Any]:
             "session_id": str(j.get("session_id") or "").strip(),
             "prompt": str(j.get("prompt") or "").strip(),
             "project_id": str(j.get("project_id") or "").strip(),
+            "max_tool_rounds": j.get("max_tool_rounds", 12),
+            "max_continuations": j.get("max_continuations", 0),
         }
         title = str(j.get("title") or "").strip()
         if title:
