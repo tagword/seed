@@ -7,10 +7,10 @@ from typing import Optional, Tuple
 
 from seed.core import env_access as _ea
 from seed.core.commands import CommandRouter
-from seed.core.llm_exec import LLMAPIExecutor
+from seed.core.llm_exec import LLMAPIExecutor, LLMError
 from seed.core.mem_sys import MemorySystem
 from seed.core.models import Session, TurnResult, UsageSummary
-from seed.core.tool_runtime import ToolExecutor, ToolRegistry
+from seed.core.tool_runtime import ToolExecutor, ToolRegistry, ToolExecutionError
 
 logger = logging.getLogger(__name__)
 
