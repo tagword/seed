@@ -1,6 +1,6 @@
 # Seed — Agent 内核
 
-> **CodeAgent 的自托管 AI Agent 核心引擎**：主循环、LLM 路由、会话、记忆、工具运行时、定时任务、Webhook，开箱即用。
+> **一个通用 AI Agent 核心**：主循环、LLM 路由、会话、记忆、工具运行时、定时任务、Webhook，开箱即用。**同一个核心，可以演变成各种各样的 Agent。**
 
 [![PyPI version](https://img.shields.io/pypi/v/seed-kernel.svg)](https://pypi.org/project/seed-kernel/)
 [![PyPI downloads](https://img.shields.io/pypi/dm/seed-kernel.svg)](https://pypi.org/project/seed-kernel/)
@@ -20,7 +20,7 @@
 - 🔗 **集成层** — 浏览器、Webhook、MCP（Streamable HTTP 自动重连）、环境配置
 - 🌍 **模型无关** — 通过 `seed-model-providers` 对接 DeepSeek / OpenAI / Anthropic / Ollama 等
 
-**Seed 不依赖任何特定宿主产品；宿主（如 CodeAgent）只依赖 Seed**。架构与依赖方向见 [docs/PACKAGE_LAYOUT.md](docs/PACKAGE_LAYOUT.md)。
+**Seed 是通用内核，不绑定任何特定产品形态**——同一个核心，可以演变成代码 Agent、写作 Agent、客服 Agent、研究 Agent……只要定义好人格、技能与模型路由。CodeAgent 只是基于 Seed 构建的 Agent 之一。架构与依赖方向见 [docs/PACKAGE_LAYOUT.md](docs/PACKAGE_LAYOUT.md)。
 
 ## 三件套
 
@@ -96,9 +96,17 @@ seed check   # 逐项导入检查
 | [docs/ENV_REFERENCE.md](docs/ENV_REFERENCE.md) | `SEED_*` 环境变量完整手册 |
 | [CHANGELOG.md](CHANGELOG.md) | 版本变更记录 |
 
-## 与 CodeAgent 的关系
+## 基于 Seed 构建你自己的 Agent
 
-[CodeAgent](https://github.com/tagword/codeagent)（`tagword-codeagent`）是基于 Seed 构建的**自主全栈开发 Agent**：
+Seed 提供内核所需的一切底层能力，你只需要在**上层定义三件事**，就能演变出一个属于自己的 Agent：
+
+1. 📜 **人格** — 用 Markdown 定义身份、行为准则、技能（参考 CodeAgent 的 `persona_defaults/`）
+2. 🛠️ **工具** — 用 `ToolRegistry` 注册内置或自定义工具
+3. 🌍 **模型路由** — 通过 `seed-model-providers` 对接你想要的模型
+
+### 一个宿主示例：CodeAgent
+
+[CodeAgent](https://github.com/tagword/codeagent)（`tagword-codeagent`）就是基于 Seed 演变出的**自主全栈开发 Agent**：
 
 ```
 ┌─────────────────────────────────────────────┐
