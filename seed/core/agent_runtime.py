@@ -2,14 +2,20 @@
 from __future__ import annotations
 
 
+import asyncio
+import contextlib
 from datetime import datetime, timezone
 import json
 import logging
-import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+import re
+import uuid
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-from seed.core.chat_events import is_chat_cancelled
+from seed.core import env_access as _ea
+from seed.core.chat_events import emit_chat_event, is_chat_cancelled
+from seed.core.llm_exec import LLMAPIExecutor, LLMError
+from seed.core.tool_runtime import ToolExecutor, ToolRegistry
 
 
 logger = logging.getLogger(__name__)
@@ -106,11 +112,6 @@ def _detect_failure_streak(
 
 
 
-
-
-from typing import Any, Dict, List, Optional, Sequence, Tuple
-
-from seed.core.tool_runtime import ToolRegistry
 
 
 def _consecutive_error_tail_count(outcomes: List[Tuple[str, bool, str]]) -> int:
@@ -216,8 +217,6 @@ def registry_to_openai_tools(
 
 
 
-
-import re
 
 # Chain-of-thought / reasoning markup (Qwen, DeepSeek, some proxies). Stripped
 # before persisting assistant content so history does not reinforce repetition.
@@ -426,21 +425,6 @@ def scrub_bare_cot_from_assistant_text(text: str) -> str:
     return text
 
 
-
-
-
-import json
-import os
-import re
-from typing import Any, Dict, List, Optional
-
-from seed.core import env_access as _ea
-from seed.core.llm_exec import LLMAPIExecutor
-
-_COMPACT_BLOCK = re.compile(
-    r"\n<<<(?:SEED_COMPACT|CODEAGENT_COMPACT)>>>\n.*?\n<<<END_(?:SEED_COMPACT|CODEAGENT_COMPACT)>>>\n",
-    re.DOTALL,
-)
 
 
 def _clean_invalid_tool_call_arguments(messages: List[Dict[str, Any]]) -> None:
@@ -955,7 +939,6 @@ def _get_compact_min_tokens() -> int:
 
     Priority: runtime override > env var > default 30000.
     """
-    global _compact_min_tokens_override
     if _compact_min_tokens_override is not None:
         return _compact_min_tokens_override
     tok = _ea.pick_nonempty(*_ea.CONTEXT_COMPACT_MIN_TOKENS)
@@ -1402,10 +1385,6 @@ def _summarizer_llm(fallback: LLMAPIExecutor) -> LLMAPIExecutor:
 
 
 
-import os
-
-
-
 def default_system_prompt() -> str:
     """Explicit env override, else config plane (if resolvable), else built-in default."""
     explicit = _ea.pick_nonempty(*_ea.SYSTEM_PROMPT)
@@ -1445,18 +1424,6 @@ def default_system_prompt() -> str:
         return base
     except Exception:
         return DEFAULT_SYSTEM
-
-
-
-import logging
-import os
-from typing import Any, Dict, List
-
-from seed.core.chat_events import emit_chat_event
-from seed.core.llm_exec import LLMAPIExecutor, LLMError
-
-
-logger = logging.getLogger(__name__)
 
 
 def maybe_compact_context_messages(
@@ -1755,20 +1722,6 @@ def _truncate_tool_output(text: str, *, tool_name: str = "tool") -> str:
 
 
 """OpenAI-style chat completions loop with tool execution."""
-
-
-import asyncio
-import contextlib
-import json
-import logging
-import uuid
-from typing import Any, Callable, Dict, List, Optional, Tuple
-
-from seed.core.chat_events import emit_chat_event
-from seed.core.llm_exec import LLMAPIExecutor
-from seed.core.tool_runtime import ToolExecutor, ToolRegistry
-
-logger = logging.getLogger(__name__)
 
 
 def _stream_llm_round(
@@ -2187,16 +2140,6 @@ async def run_llm_tool_loop(
         except Exception:
             pass
 
-
-
-import json
-import os
-import re
-import uuid
-from typing import Any, Dict, List, Optional, Sequence, Tuple
-
-from seed.core import env_access as _ea
-from seed.core.tool_runtime import ToolRegistry
 
 _TOOL_CALL_WRAPPER_RE = re.compile(
     r"<tool_call>\s*[\s\S]*?</tool_call>", re.IGNORECASE

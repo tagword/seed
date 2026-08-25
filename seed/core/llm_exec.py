@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import copy
+import json
+import logging
 import os
-from typing import Optional
+import re
+import requests
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
 from seed.core import env_access as _ea
+
+logger = logging.getLogger(__name__)
 
 
 class LLMAPIExecutor:
@@ -88,19 +95,6 @@ class LLMAPIExecutor:
 
 
 
-import copy
-import json
-import logging
-import os
-import re
-from typing import Any, Dict, List, Optional, Tuple
-
-import requests
-
-
-logger = logging.getLogger(__name__)
-
-
 def _requests_proxies_for(url: str):
     """Disable proxying for local LLM endpoints (Ollama / SGLang / etc.).
 
@@ -169,7 +163,7 @@ def generate(
     else:
         resolved_thinking = bool(enable_thinking)
 
-    from seed.core.model_providers import apply_chat_thinking_extra_body, apply_chat_stream_options
+    from seed.core.model_providers import apply_chat_thinking_extra_body
 
     apply_chat_thinking_extra_body(
         chat_protocol=self.chat_protocol,
@@ -389,18 +383,6 @@ def generate(
 
 
 
-import copy
-import json
-import logging
-import os
-from typing import Any, Dict, Generator, List, Optional
-
-import requests
-
-
-logger = logging.getLogger(__name__)
-
-
 def generate_stream(
     self,
     messages: List[Dict[str, Any]],
@@ -418,6 +400,8 @@ def generate_stream(
       - ``"tool_calls"``: ``{"type": "tool_calls", "tool_calls": [...]}``
       - ``"done"``: ``{"type": "done", "content": "...", "metadata": {...}}``
     """
+    from seed.core.model_providers import apply_chat_stream_options
+
     self._ensure_base_url()
     eff_max = self.maxOutputTokens if max_tokens is None else int(max_tokens)
     api_messages = _openai_chat_messages(
@@ -447,7 +431,7 @@ def generate_stream(
     else:
         resolved_thinking = bool(enable_thinking)
 
-    from seed.core.model_providers import apply_chat_thinking_extra_body, apply_chat_stream_options
+    from seed.core.model_providers import apply_chat_thinking_extra_body
 
     apply_chat_thinking_extra_body(
         chat_protocol=self.chat_protocol,
@@ -498,7 +482,6 @@ def generate_stream(
         content_parts: List[str] = []
         reasoning_parts: List[str] = []
         tool_calls_accum: List[Dict[str, Any]] = []
-        finish_reason: Optional[str] = None
         usage: Dict[str, Any] = {}
 
         # 强制 UTF-8 解码，兼容部分 SSE 服务端未返回 charset=utf-8 的情况
@@ -532,10 +515,6 @@ def generate_stream(
             if not choices:
                 continue
             delta = choices[0].get("delta") or {}
-            # finish_reason at the choice level
-            fr = choices[0].get("finish_reason")
-            if fr:
-                finish_reason = fr
 
             # Content delta
             text = _msg_text_to_str(delta.get("content"))
@@ -639,17 +618,6 @@ def ensure_llm_executor_methods() -> None:
 
 
 ensure_llm_executor_methods()
-
-
-"""LLM API executor for CodeAgent - Connect to external LLM API"""
-import json
-import logging
-import os
-from typing import Any, Dict, List, Optional
-
-from seed.core import env_access as _ea
-
-logger = logging.getLogger(__name__)
 
 
 def _is_deepseek_url(base_url: Optional[str] = None) -> bool:
@@ -869,10 +837,8 @@ def _strip_think_tags(content: str) -> tuple[str, str]:
     if not content or "<think>" not in content.lower():
         return content, ""
     parts: List[str] = []
-    last_end = 0
     for m in _THINK_TAG_RE.finditer(content):
         parts.append(m.group(1))
-        last_end = m.end()
     cleaned = _THINK_TAG_RE.sub("", content).strip()
     thinking = "\n\n".join(p.strip() for p in parts if p and p.strip())
     return cleaned, thinking
@@ -1398,11 +1364,6 @@ class LLMError(Exception):
 
 
 
-
-import os
-from typing import Optional, Tuple
-
-
 _default_executor: Optional[LLMAPIExecutor] = None
 _executor_env_key: Optional[Tuple[str, str, str, str, str, str]] = None
 
@@ -1489,15 +1450,6 @@ def reset_llm_executor() -> None:
 
 
 """Shrink chat-completions JSON before HTTP POST to avoid gateway 413 (body too large)."""
-
-
-import json
-import logging
-import os
-from typing import Any, Dict, List, Optional
-
-
-logger = logging.getLogger(__name__)
 
 
 def request_json_size(params: Dict[str, Any]) -> int:
