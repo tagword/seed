@@ -767,6 +767,21 @@ def merge_llm_tail_into_full(
     """Append messages produced during ``run_llm_tool_loop`` (``api_messages[n_before_llm:]``) onto ``full_messages``."""
     if n_before_llm < 0:
         n_before_llm = 0
+    # ── mid-loop compact 容错 ──
+    # run_llm_tool_loop 在工具循环中可能触发 mid-loop compact
+    # （SEED_CONTEXT_COMPACT_MID_LOOP=1）：它通过 `messages[:] = [sys] + recent`
+    # 原地重建 api_messages，使列表长度骤减、n_before_llm 索引直接失效。
+    # 此时 api_messages[n_before_llm:] 为空 → 本轮 LLM 全部输出（assistant + tool）
+    # 全部丢失（cron/CLI/task_runner 曾因此只持久化 user 消息、无任何回复）。
+    # 修复：退化为以「最后一条 user 消息之后」为合并边界——LLM 工具循环只追加
+    # assistant/tool 消息，最后一条 user（通常是本轮触发消息）之后即为本轮新增输出；
+    # compact 保留的 recent 轮次（更早的 user/assistant/tool）位于该 user 之前，不会重复。
+    if len(api_messages) < n_before_llm:
+        last_user_idx = -1
+        for _i, _m in enumerate(api_messages):
+            if isinstance(_m, dict) and _m.get("role") == "user":
+                last_user_idx = _i
+        n_before_llm = last_user_idx + 1
     tail = [
         message
         for message in api_messages[n_before_llm:]
