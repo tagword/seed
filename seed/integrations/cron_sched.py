@@ -14,7 +14,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from seed.core import env_access as _ea
 from seed.core._session_cache import SESSIONS, _memkey
@@ -23,6 +23,25 @@ logger = logging.getLogger(__name__)
 
 # Track currently running cron jobs to prevent overlapping triggers
 _active_jobs: set = set()
+
+# 宿主注入的 cron job handler（由 codeagent 等注册）。seed 是独立内核包，
+# 不反向依赖宿主——通过 register_cron_job_handler 单向注入回调。注册后
+# cron 触发时由 handler 全权执行（复用宿主的 chat 管道，获得 running 状态、
+# 消息注入、可停止等能力）；未注册时走 seed 内置精简实现（fallback）。
+_job_handler: Optional[Callable[[Dict[str, Any]], Awaitable[Any]]] = None
+
+
+def register_cron_job_handler(
+    fn: Optional[Callable[[Dict[str, Any]], Awaitable[Any]]],
+) -> None:
+    """Register an external cron job handler (host-injected, e.g. codeagent).
+
+    ``fn`` receives the raw cron job dict (id/agent_id/session_id/prompt/
+    max_tool_rounds/...). Pass ``None`` to unregister and fall back to the
+    built-in implementation.
+    """
+    global _job_handler
+    _job_handler = fn
 
 
 def _normalize_cron_outcome(text: str) -> str:
@@ -94,6 +113,48 @@ def _cron_outcome_matches_latest(
         prev = _extract_outcome_section(body)
         return _normalize_cron_outcome(prev) == new_norm
     return False
+
+
+def _log_cron_experience_sync(
+    *,
+    agent_id: str,
+    jid: str,
+    sid: str,
+    reply: str,
+    tools_used: List[str],
+) -> None:
+    """Write a cron run outcome to the agent's episodic memory (thread-safe)."""
+    if _ea.pick_default("1", *_ea.MEMORY_LOG).lower() in ("0", "false", "no"):
+        return
+    try:
+        from seed.core.paths import agent_memory_dir
+        from seed.core.mem_sys import MemorySystem
+
+        mem = MemorySystem(base_path=agent_memory_dir(agent_id))
+        outcome = (reply or "")[:2000]
+        skip_dup = _ea.pick_default(
+            "", *_ea.CRON_EXPERIENCE_SKIP_DUPLICATE
+        ).lower() in ("1", "true", "yes", "on")
+        if skip_dup and _cron_outcome_matches_latest(
+            mem, job_id=jid, session_id=sid, new_outcome=outcome
+        ):
+            logger.info(
+                "cron job id=%s: skip experience log (outcome unchanged vs latest for session=%s)",
+                jid,
+                sid,
+            )
+            return
+        ttl_raw = _ea.pick_nonempty(*_ea.CRON_EXPERIENCE_TTL_SECONDS)
+        ttl_val = int(ttl_raw) if ttl_raw.isdigit() else None
+        mem.log_experience(
+            task_id=f"cron-{jid}-{datetime.now(timezone.utc).isoformat()}",
+            outcome=outcome,
+            tools_used=tools_used,
+            session_id=sid,
+            ttl_seconds=ttl_val,
+        )
+    except Exception:
+        logger.exception("cron experience log failed id=%s", jid)
 
 
 CRON_JSON = "seed.cron.json"
@@ -260,6 +321,44 @@ async def _run_cron_job_async(job: Dict[str, Any]) -> None:
         return
     _active_jobs.add(jid)
 
+    # ── 宿主 handler 注入：cron 触发 → 复用宿主的 chat 消息口（run_chat_turn） ──
+    # seed 只保留触发语义与防重入；执行全权交给注入的 handler（codeagent），
+    # 使 cron 获得与 WebUI 一致的 running 状态 / 消息注入 / 可停止 / 持久化。
+    if _job_handler is not None:
+        _hresult: Any = None
+        try:
+            _hresult = await _job_handler(job)
+        except Exception:
+            logger.exception("cron job handler crashed id=%s", jid)
+        finally:
+            _active_jobs.discard(jid)
+        # 经验日志仍由 seed 负责（与内置分支一致），从 handler 返回值取 reply/tools_used
+        if isinstance(_hresult, dict) and not _hresult.get("skipped") and not _hresult.get("queued"):
+            try:
+                await asyncio.to_thread(
+                    _log_cron_experience_sync,
+                    agent_id=agent_id,
+                    jid=jid,
+                    sid=sid,
+                    reply=str(_hresult.get("reply") or ""),
+                    tools_used=(
+                        list(_hresult.get("tools_used"))
+                        if isinstance(_hresult.get("tools_used"), list)
+                        else []
+                    ),
+                )
+            except Exception:
+                logger.exception("cron experience log failed id=%s", jid)
+        logger.info(
+            "cron job done id=%s agent=%s session=%s (handler) skipped=%s queued=%s",
+            jid,
+            agent_id,
+            sid,
+            bool(isinstance(_hresult, dict) and _hresult.get("skipped")),
+            bool(isinstance(_hresult, dict) and _hresult.get("queued")),
+        )
+        return
+
     try:
         from seed.core.paths import ensure_agent_dirs
         await asyncio.to_thread(ensure_agent_dirs, agent_id)
@@ -398,38 +497,14 @@ async def _run_cron_job_async(job: Dict[str, Any]) -> None:
         except Exception:
             logger.exception("cron persist failed job=%s", jid)
         SESSIONS[mkey] = chat_sess
-        if _ea.pick_default("1", *_ea.MEMORY_LOG).lower() not in ("0", "false", "no"):
-            try:
-                from seed.core.paths import agent_memory_dir
-
-                def _log_cron_experience():
-                    mem = MemorySystem(base_path=agent_memory_dir(agent_id))
-                    outcome = (reply or "")[:2000]
-                    skip_dup = _ea.pick_default(
-                        "", *_ea.CRON_EXPERIENCE_SKIP_DUPLICATE
-                    ).lower() in ("1", "true", "yes", "on")
-                    if skip_dup and _cron_outcome_matches_latest(
-                        mem, job_id=jid, session_id=sid, new_outcome=outcome
-                    ):
-                        logger.info(
-                            "cron job id=%s: skip experience log (outcome unchanged vs latest for session=%s)",
-                            jid,
-                            sid,
-                        )
-                        return
-                    ttl_raw = _ea.pick_nonempty(*_ea.CRON_EXPERIENCE_TTL_SECONDS)
-                    ttl_val = int(ttl_raw) if ttl_raw.isdigit() else None
-                    mem.log_experience(
-                        task_id=f"cron-{jid}-{datetime.now(timezone.utc).isoformat()}",
-                        outcome=outcome,
-                        tools_used=tools_used,
-                        session_id=sid,
-                        ttl_seconds=ttl_val,
-                    )
-
-                await asyncio.to_thread(_log_cron_experience)
-            except Exception:
-                pass
+        await asyncio.to_thread(
+            _log_cron_experience_sync,
+            agent_id=agent_id,
+            jid=jid,
+            sid=sid,
+            reply=reply or "",
+            tools_used=tools_used or [],
+        )
         logger.info(
             "cron job done id=%s agent=%s session=%s tools=%s trace_len=%s",
             jid,
@@ -779,6 +854,7 @@ def run_cron_job_sync(job: Dict[str, Any]) -> None:
         logger.info("cron job %s: previous run still active, skip this trigger", jid)
         return
     _active_jobs.add(jid)
+
 
     try:
         from seed.core.paths import ensure_agent_dirs
