@@ -342,7 +342,15 @@ async def _run_cron_job_async(job: Dict[str, Any]) -> None:
             chat_sess.messages,
             skills_suffix=None,
         )
-        compact_result = maybe_compact_context_messages(api_msgs, llm)
+        # ── 循环前压缩与 WebUI 对齐：传入持久化的 context_usage（上次执行记录的
+        # peak/prompt tokens），让压缩在 n_before 记录之前发生；否则 cron 首轮
+        # 总是携带全量上下文（曾出现 104 万字节请求体），只能依赖 mid-loop 压缩。
+        _prev_cu = chat_sess.metadata.get("context_usage")
+        compact_result = maybe_compact_context_messages(
+            api_msgs,
+            llm,
+            persisted_context_usage=_prev_cu if isinstance(_prev_cu, dict) else None,
+        )
         persist_compact_summary(chat_sess.messages, compact_result)
         strip_ephemeral_message_fields(api_msgs)
         await asyncio.to_thread(
@@ -358,13 +366,33 @@ async def _run_cron_job_async(job: Dict[str, Any]) -> None:
         n_before = len(api_msgs)
         # ── single run (no continuation loop — cron interval handles retriggering) ──
         cron_max_rounds = max(1, int(job.get("max_tool_rounds") or 16))
-        reply, __, tools_used, tool_trace, _loop_meta = await run_llm_tool_loop(
+        reply, __meta, tools_used, tool_trace, _loop_meta = await run_llm_tool_loop(
             llm, exe,
             messages=api_msgs,
             registry=reg,
             max_tool_rounds=cron_max_rounds,
         )
         merge_llm_tail_into_full(chat_sess.messages, api_msgs, n_before)
+        # ── 回写 context_usage（与 WebUI 一致），供下次 cron 循环前压缩触发 ──
+        try:
+            from seed.core.agent_runtime import (
+                apply_context_usage_metadata,
+                build_context_usage_from_run,
+            )
+            if isinstance(chat_sess.metadata, dict):
+                _ctx_snap = build_context_usage_from_run(
+                    api_msgs,
+                    loop_meta=_loop_meta,
+                    last_meta=__meta,
+                    model_name=getattr(llm, "model", None),
+                )
+                apply_context_usage_metadata(
+                    chat_sess.metadata,
+                    _ctx_snap,
+                    updated_at=datetime.now(timezone.utc).isoformat(),
+                )
+        except Exception:
+            logger.debug("cron context_usage writeback failed", exc_info=True)
         try:
             await asyncio.to_thread(persist_chat_session, chat_sess, agent_id)
         except Exception:
@@ -832,7 +860,13 @@ def run_cron_job_sync(job: Dict[str, Any]) -> None:
             chat_sess.messages,
             skills_suffix=None,
         )
-        compact_result = maybe_compact_context_messages(api_msgs, llm)
+        # 循环前压缩与 WebUI 对齐：传入持久化 context_usage，避免首轮全量裸奔
+        _prev_cu = chat_sess.metadata.get("context_usage")
+        compact_result = maybe_compact_context_messages(
+            api_msgs,
+            llm,
+            persisted_context_usage=_prev_cu if isinstance(_prev_cu, dict) else None,
+        )
         persist_compact_summary(chat_sess.messages, compact_result)
         strip_ephemeral_message_fields(api_msgs)
         finalize_episodic_for_llm(
@@ -847,7 +881,7 @@ def run_cron_job_sync(job: Dict[str, Any]) -> None:
         n_before = len(api_msgs)
         # ── single run (no continuation loop — cron interval handles retriggering) ──
         cron_max_rounds = max(1, int(job.get("max_tool_rounds") or 16))
-        reply, __, tools_used, tool_trace, _loop_meta = asyncio.run(
+        reply, __meta, tools_used, tool_trace, _loop_meta = asyncio.run(
             run_llm_tool_loop(
                 llm, exe,
                 messages=api_msgs,
@@ -856,6 +890,26 @@ def run_cron_job_sync(job: Dict[str, Any]) -> None:
             )
         )
         merge_llm_tail_into_full(chat_sess.messages, api_msgs, n_before)
+        # 回写 context_usage（与 WebUI 一致），供下次 cron 循环前压缩触发
+        try:
+            from seed.core.agent_runtime import (
+                apply_context_usage_metadata,
+                build_context_usage_from_run,
+            )
+            if isinstance(chat_sess.metadata, dict):
+                _ctx_snap = build_context_usage_from_run(
+                    api_msgs,
+                    loop_meta=_loop_meta,
+                    last_meta=__meta,
+                    model_name=getattr(llm, "model", None),
+                )
+                apply_context_usage_metadata(
+                    chat_sess.metadata,
+                    _ctx_snap,
+                    updated_at=datetime.now(timezone.utc).isoformat(),
+                )
+        except Exception:
+            logger.debug("cron context_usage writeback failed", exc_info=True)
         try:
             persist_chat_session(chat_sess, agent_id)
         except Exception:
