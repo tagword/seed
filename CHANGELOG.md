@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.18 (2026-08-27)
+
+- feat(cron): host-injected job handler — 新增 `register_cron_job_handler()`，cron 任务触发改走宿主 chat 管道（宿主可注入自定义执行函数，不再固定内部实现）
+- fix(cron): 循环前压缩与 WebUI 对齐 — 传入持久化 context_usage 让 `maybe_compact` 在 `n_before` 记录前触发（旧行为无 token 数据永不触发，首轮全量裸奔 1MB 请求体）；执行后回写 context_usage 供下次触发
+- fix(core): `merge_llm_tail_into_full` 兼容 mid-loop compact — `api_messages` 被原地重建后 `n_before` 索引失效导致 LLM 输出（assistant/tool）全部丢失、session 只剩 user 消息；退化为以最后一条 user 消息之后为合并边界
+- fix(turn_loop): 补缺失的 `LLMError`/`ToolExecutionError` import，修复异常路径 NameError
+- refactor(core): 归一化 `agent_runtime`/`llm_exec` 重复 import，净减 105 行
+- docs(readme): 定位调整为「通用 Agent 核心」+ 修正包名/安装方式/文档引用 + 营销定位重写
+
 ## 1.0.17 (2026-08-18)
 
 - fix(cron): 调度器启动失败不再静默 — 新增模块级 `cron_startup_error`，`start_cron_scheduler()` 失败（APScheduler 缺失 / `sched.start()` 异常）时记录，`cron_status_for_ui()` 返回 `startup_error` 字段，Web UI 可直接看到调度器未运行/失败原因（此前失败只进日志，cron 无声停摆）
