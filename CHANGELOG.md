@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.19 (2026-08-27)
+
+- fix(core): `ToolExecutor` 调度参数 `tool_name` → `tool` — 消除与工具入参同名冲突（如 `mcp_call` 的工具参数也叫 `tool_name`，`execute_async("mcp_call", tool_name=..., ...)` 抛 `TypeError: got multiple values`，请求到不了 MCP server）。修复 mcp_call 调用必崩问题
+
 ## 1.0.18 (2026-08-27)
 
 - feat(cron): host-injected job handler — 新增 `register_cron_job_handler()`，cron 任务触发改走宿主 chat 管道（宿主可注入自定义执行函数，不再固定内部实现）
