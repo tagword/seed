@@ -114,22 +114,26 @@ class ToolExecutor:
     def __init__(self, registry: ToolRegistry):
         self.registry = registry
 
-    def execute(self, tool_name: str, **kwargs: Any) -> Any:
-        if not self.registry.exists(tool_name):
+    def execute(self, tool: str, **kwargs: Any) -> Any:
+        # 注意：调度参数命名为 `tool`（而非 `tool_name`），避免与工具自身
+        # 同名参数冲突。例如 mcp_call 的入参就含 `tool_name` —— 若这里也叫
+        # `tool_name`，execute("mcp_call", tool_name=..., ...) 会触发
+        # "got multiple values for argument 'tool_name'"。
+        if not self.registry.exists(tool):
             raise ToolExecutionError(
-                tool_name=tool_name,
-                message=f"Tool '{tool_name}' not found",
+                tool_name=tool,
+                message=f"Tool '{tool}' not found",
             )
 
-        handler = self.registry.handlers.get(tool_name)
+        handler = self.registry.handlers.get(tool)
 
         if not handler:
             raise ToolExecutionError(
-                tool_name=tool_name,
-                message=f"Handler for tool '{tool_name}' not found",
+                tool_name=tool,
+                message=f"Handler for tool '{tool}' not found",
             )
 
-        logger.info(f"Executing tool: {tool_name} with args: {kwargs}")
+        logger.info(f"Executing tool: {tool} with args: {kwargs}")
 
         try:
             result = handler(**kwargs)
@@ -137,95 +141,95 @@ class ToolExecutor:
                 try:
                     asyncio.get_running_loop()
                     raise ToolExecutionError(
-                        tool_name=tool_name,
+                        tool_name=tool,
                         message="Async tool called from sync context; use execute_async()",
                     )
                 except RuntimeError:
                     result = asyncio.run(result)  # type: ignore[arg-type]
-            logger.info(f"Tool '{tool_name}' executed successfully")
+            logger.info(f"Tool '{tool}' executed successfully")
             return result
         except Exception as e:
             raise ToolExecutionError(
-                tool_name=tool_name,
+                tool_name=tool,
                 message=str(e),
                 original_error=e,
             )
 
-    async def execute_async(self, tool_name: str, **kwargs: Any) -> Any:
-        if not self.registry.exists(tool_name):
+    async def execute_async(self, tool: str, **kwargs: Any) -> Any:
+        if not self.registry.exists(tool):
             raise ToolExecutionError(
-                tool_name=tool_name,
-                message=f"Tool '{tool_name}' not found",
+                tool_name=tool,
+                message=f"Tool '{tool}' not found",
             )
-        handler = self.registry.handlers.get(tool_name)
+        handler = self.registry.handlers.get(tool)
         if not handler:
             raise ToolExecutionError(
-                tool_name=tool_name,
-                message=f"Handler for tool '{tool_name}' not found",
+                tool_name=tool,
+                message=f"Handler for tool '{tool}' not found",
             )
-        logger.info(f"Executing tool (async): {tool_name} with args: {kwargs}")
+        logger.info(f"Executing tool (async): {tool} with args: {kwargs}")
         try:
-            _emit_tool_hooks("pre_tool_call", tool_name, kwargs)
+            _emit_tool_hooks("pre_tool_call", tool, kwargs)
             if inspect.iscoroutinefunction(handler):
                 result = await handler(**kwargs)
             else:
                 result = await asyncio.to_thread(handler, **kwargs)
             _emit_tool_hooks(
                 "post_tool_call",
-                tool_name,
+                tool,
                 kwargs,
                 extra={"result_preview": _hook_preview(result)},
             )
-            logger.info(f"Tool '{tool_name}' executed successfully")
+            logger.info(f"Tool '{tool}' executed successfully")
             return result
         except Exception as e:
             _emit_tool_hooks(
                 "post_tool_call",
-                tool_name,
+                tool,
                 kwargs,
                 extra={"error": str(e)},
             )
             raise ToolExecutionError(
-                tool_name=tool_name,
+                tool_name=tool,
                 message=str(e),
                 original_error=e,
             )
 
-    def execute_with_validation(self, tool_name: str, args: Dict[str, Any]) -> Any:
-        if not self.registry.exists(tool_name):
+    def execute_with_validation(self, tool: str, args: Dict[str, Any]) -> Any:
+        if not self.registry.exists(tool):
             raise ToolExecutionError(
-                tool_name=tool_name,
-                message=f"Tool '{tool_name}' not found",
+                tool_name=tool,
+                message=f"Tool '{tool}' not found",
             )
 
-        tool = self.registry.get(tool_name)
+        meta = self.registry.get(tool)
 
-        if tool is None:
+        if meta is None:
             raise ToolExecutionError(
-                tool_name=tool_name,
-                message=f"Tool '{tool_name}' not found",
+                tool_name=tool,
+                message=f"Tool '{tool}' not found",
             )
 
-        if tool.parameters:
-            self._validate_parameters(tool, args)
+        if meta.parameters:
+            self._validate_parameters(meta, args)
 
-        return self.execute(tool_name, **args)
+        return self.execute(tool, **args)
 
-    async def execute_with_validation_async(self, tool_name: str, args: Dict[str, Any]) -> Any:
-        if not self.registry.exists(tool_name):
+    async def execute_with_validation_async(self, tool: str, args: Dict[str, Any]) -> Any:
+        if not self.registry.exists(tool):
             raise ToolExecutionError(
-                tool_name=tool_name,
-                message=f"Tool '{tool_name}' not found",
+                tool_name=tool,
+                message=f"Tool '{tool}' not found",
             )
-        tool = self.registry.get(tool_name)
-        if tool is None:
+        meta = self.registry.get(tool)
+        if meta is None:
             raise ToolExecutionError(
-                tool_name=tool_name,
-                message=f"Tool '{tool_name}' not found",
+                tool_name=tool,
+                message=f"Tool '{tool}' not found",
             )
-        if tool.parameters:
-            self._validate_parameters(tool, args)
-        return await self.execute_async(tool_name, **args)
+        if meta.parameters:
+            self._validate_parameters(meta, args)
+        return await self.execute_async(tool, **args)
 
     def _validate_parameters(self, tool: Tool, args: Dict[str, Any]) -> None:
         required = [
