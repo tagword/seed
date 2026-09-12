@@ -82,8 +82,36 @@ def _get_conn(agent_id: str) -> sqlite3.Connection:
                 conn.execute("ALTER TABLE session_meta ADD COLUMN archived INTEGER DEFAULT 0")
             except sqlite3.OperationalError:
                 pass  # 列已存在
+            # 确保虚拟项目 __unassigned__ 存在（承载无项目会话）。
+            # 历史实现仅在 JSON→SQLite 迁移时插入该行，导致全新环境
+            # 永远没有"未分类"容器、随手聊无法注册。这里对所有环境兜底。
+            _ensure_unassigned_project(conn)
             _connections[agent_id] = conn
         return _connections[agent_id]
+
+
+def _ensure_unassigned_project(conn: sqlite3.Connection) -> None:
+    """确保虚拟项目 __unassigned__ 存在（幂等）。
+
+    所有环境（全新 / 老库 / 迁移后）统一在此兜底创建，
+    使无项目会话始终有归属容器。
+    """
+    try:
+        cur = conn.execute(
+            "SELECT 1 FROM projects WHERE id = ?", (UNASSIGNED_PROJECT_ID,)
+        )
+        if cur.fetchone():
+            return
+        now = _utc_iso()
+        conn.execute(
+            "INSERT OR IGNORE INTO projects (id, name, path, created_at, updated_at) "
+            "VALUES (?, ?, '', ?, ?)",
+            (UNASSIGNED_PROJECT_ID, UNASSIGNED_PROJECT_NAME, now, now),
+        )
+        conn.commit()
+    except sqlite3.Error:
+        # 兜底逻辑不应阻断主流程（如只读库等场景）
+        pass
 
 
 def _close_conn(agent_id: str) -> None:

@@ -844,15 +844,31 @@ def persist_chat_session(session: Session, agent_id: Optional[str] = None) -> Pa
     handle = str(session.name or session.id or "").strip()
     if handle:
         _remove_legacy_session_copy(handle, agent_id)
-    # 注册到项目 registry 并缓存元信息
-    # 无 project_id 的会话暂不注册（等发消息时 project_id 设好后再注册）
+    # 注册到项目 registry 并缓存元信息。
+    # 无 project_id 的会话归入虚拟项目 __unassigned__（"未分类"），
+    # 使其在 WebUI 会话列表中可见；但排除系统会话（Cron/Webhook 等），
+    # 避免自动化任务污染用户的"未分类"视图。
     pid = ""
     if isinstance(session.metadata, dict):
         pid = str(session.metadata.get("project_id") or "").strip()
+    if not pid and handle and not _is_system_session(session):
+        pid = UNASSIGNED_PROJECT_ID
     if pid and handle:
         sess_meta = _extract_session_meta(session)
         register_session(agent_id or agent_id_default(), pid, handle, sess_meta)
     return out
+
+
+def _is_system_session(session: Session) -> bool:
+    """判断是否为系统自动会话（Cron / Webhook 等），不纳入用户会话列表。"""
+    md = session.metadata if isinstance(session.metadata, dict) else {}
+    channel = str(md.get("channel") or "").strip().lower()
+    source = str(md.get("source") or "").strip().lower()
+    if channel in ("cron", "webhook"):
+        return True
+    if source.startswith("cron:") or source.startswith("webhook:"):
+        return True
+    return False
 
 
 def _session_json_path(handle: str) -> Path:
