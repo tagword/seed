@@ -848,6 +848,12 @@ def persist_chat_session(session: Session, agent_id: Optional[str] = None) -> Pa
     # 无 project_id 的会话归入虚拟项目 __unassigned__（"未分类"），
     # 使其在 WebUI 会话列表中可见；但排除系统会话（Cron/Webhook 等），
     # 避免自动化任务污染用户的"未分类"视图。
+    #
+    # 产品决策（已确认，勿"顺手优化"）：归属严格按显式 project_id，
+    # 不自动跟随用户"当前选中项目"。即：用户没选项目（projectId=''）
+    # 就是"随手聊"，归入未分类；不会因为侧边栏恰好选中某项目而误归入。
+    # 前端 projectId 是持久化全局态，选中项目后持续归属该项目，
+    # 仅当用户主动切到未分类时才进 __unassigned__。
     pid = ""
     if isinstance(session.metadata, dict):
         pid = str(session.metadata.get("project_id") or "").strip()
