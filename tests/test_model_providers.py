@@ -298,7 +298,10 @@ def test_preset_auto_name() -> None:
 
 
 def test_deepseek_thinking_extra_body_effort_mapping() -> None:
-    from seed.core.model_providers import apply_chat_thinking_extra_body, normalize_reasoning_effort
+    """DeepSeek API 文档未列 reasoning_effort（仅 thinking.type 开关），
+    因此后端不得把 reasoning_effort 写入请求体——无论前端传什么。
+    """
+    from seed.core.model_providers import apply_chat_thinking_extra_body
 
     params: dict = {}
     extra: dict = {}
@@ -310,7 +313,7 @@ def test_deepseek_thinking_extra_body_effort_mapping() -> None:
         resolved_thinking=True,
     )
     assert extra["thinking"] == {"type": "enabled"}
-    assert params["reasoning_effort"] == "high"
+    assert "reasoning_effort" not in params
 
     params_override: dict = {}
     extra_override: dict = {}
@@ -322,8 +325,7 @@ def test_deepseek_thinking_extra_body_effort_mapping() -> None:
         resolved_thinking=True,
         reasoning_effort="max",
     )
-    assert params_override["reasoning_effort"] == "max"
-    assert normalize_reasoning_effort("xhigh") == "max"
+    assert "reasoning_effort" not in params_override
 
     params2: dict = {}
     extra2: dict = {}
@@ -338,16 +340,20 @@ def test_deepseek_thinking_extra_body_effort_mapping() -> None:
             extra_body=extra2,
             resolved_thinking=True,
         )
-        assert params2["reasoning_effort"] == "max"
+        assert "reasoning_effort" not in params2
     finally:
         os.environ.pop("SEED_LLM_REASONING_EFFORT", None)
 
 
 def test_normalize_deepseek_chat_model() -> None:
+    """2026-09：旧名（V3.2/V4 过渡期）应一律指向新名 deepseek-flash。"""
     from seed.core.model_providers import normalize_deepseek_chat_model
 
-    assert normalize_deepseek_chat_model("deepseek-chat") == "deepseek-v4-flash"
-    assert normalize_deepseek_chat_model("deepseek-reasoner") == "deepseek-v4-flash"
+    assert normalize_deepseek_chat_model("deepseek-chat") == "deepseek-flash"
+    assert normalize_deepseek_chat_model("deepseek-reasoner") == "deepseek-flash"
+    assert normalize_deepseek_chat_model("deepseek-v4-flash") == "deepseek-flash"
+    assert normalize_deepseek_chat_model("deepseek-v4-flash-vision-exp") == "deepseek-flash"
+    assert normalize_deepseek_chat_model("deepseek-flash") == "deepseek-flash"
     assert normalize_deepseek_chat_model("deepseek-v4-pro") == "deepseek-v4-pro"
 
 
@@ -375,7 +381,7 @@ def test_materialize_preset_from_form_deepseek_chat() -> None:
             "api_key": "k",
         }
     )
-    assert legacy["model"] == "deepseek-v4-flash"
+    assert legacy["model"] == "deepseek-flash"
 
 
 # ---------------------------------------------------------------------------
