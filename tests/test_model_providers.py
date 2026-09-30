@@ -376,3 +376,103 @@ def test_materialize_preset_from_form_deepseek_chat() -> None:
         }
     )
     assert legacy["model"] == "deepseek-v4-flash"
+
+
+# ---------------------------------------------------------------------------
+# MiniMax thinking-mode contract (verified against api.minimaxi.com, 2026-09)
+# ---------------------------------------------------------------------------
+
+def _minimax_body(model, *, thinking=True, effort=None):
+    from seed.core.model_providers import apply_chat_thinking_extra_body
+    params, extra = {}, {}
+    apply_chat_thinking_extra_body(
+        chat_protocol="minimax",
+        base_url="https://api.minimaxi.com/v1",
+        params=params,
+        extra_body=extra,
+        resolved_thinking=thinking,
+        reasoning_effort=effort,
+        model=model,
+    )
+    return params, extra
+
+
+def test_minimax_disable_thinking_sends_thinking_disabled() -> None:
+    """关闭思考必须显式传 thinking.type=disabled，否则服务端仍会思考。"""
+    _, extra = _minimax_body("MiniMax-M3", thinking=False)
+    assert extra["thinking"] == {"type": "disabled"}
+    assert extra["reasoning_split"] is False
+
+
+def test_minimax_enable_thinking_splits_reasoning() -> None:
+    """开启思考：thinking=adaptive + reasoning_split=True（拆到 reasoning_content）。"""
+    _, extra = _minimax_body("MiniMax-M3", thinking=True)
+    assert extra["thinking"] == {"type": "adaptive"}
+    assert extra["reasoning_split"] is True
+
+
+def test_minimax_forced_thinking_model_never_sends_disabled() -> None:
+    """M3.1-Flash-Preview 强制 thinking：传 disabled 会 400，必须保持 adaptive。"""
+    _, extra = _minimax_body("MiniMax-M3.1-Flash-Preview", thinking=False)
+    assert extra["thinking"] == {"type": "adaptive"}
+    assert extra["reasoning_split"] is True
+
+
+def test_minimax_forced_split_model_never_sends_false() -> None:
+    """M3.1-Flash-Preview 强制 reasoning_split=true（false → 400）。"""
+    _, extra = _minimax_body("MiniMax-M3.1-Flash-Preview", thinking=True)
+    assert extra["reasoning_split"] is True
+
+
+def test_minimax_m2x_omits_thinking_switch() -> None:
+    """M2.x 无法关闭 thinking，传 disabled 会被忽略，索性不传。"""
+    _, extra = _minimax_body("MiniMax-M2.7", thinking=False)
+    assert "thinking" not in extra
+    assert extra["reasoning_split"] is False
+
+
+def test_minimax_reasoning_effort_only_for_m3_1_flash() -> None:
+    """reasoning_effort 仅 M3.1-Flash-Preview 生效，且走顶层参数。"""
+    params, _ = _minimax_body("MiniMax-M3.1-Flash-Preview", thinking=True, effort="high")
+    assert params["reasoning_effort"] == "high"
+    params2, _ = _minimax_body("MiniMax-M3", thinking=True, effort="high")
+    assert "reasoning_effort" not in params2
+
+
+def test_minimax_reasoning_effort_clamped() -> None:
+    """MiniMax 不支持 none；DeepSeek 别名需映射到 MiniMax 档位。"""
+    from seed.core.model_providers import normalize_minimax_reasoning_effort
+    assert normalize_minimax_reasoning_effort("none") == "low"
+    assert normalize_minimax_reasoning_effort("minimal") == "low"
+    assert normalize_minimax_reasoning_effort("xhigh") == "xhigh"
+    assert normalize_minimax_reasoning_effort("bogus") == "max"
+    assert normalize_minimax_reasoning_effort("medium") == "medium"
+
+
+def test_minimax_no_thinking_models_get_no_fields() -> None:
+    """MiniMax-Text-01 无 thinking 能力，不应传任何思考字段。"""
+    params, extra = _minimax_body("MiniMax-Text-01", thinking=True, effort="high")
+    assert "thinking" not in extra
+    assert "reasoning_split" not in extra
+    assert "reasoning_effort" not in params
+
+
+def test_minimax_default_chat_model_is_m3() -> None:
+    from seed.core.model_providers import PROVIDER_CATALOG
+    spec = [p for p in PROVIDER_CATALOG if p["id"] == "minimax"][0]
+    assert spec["default_chat_model"] == "MiniMax-M3"
+    ids = [m["id"] for m in spec["models"]["chat"]]
+    assert "MiniMax-M3.1-Flash-Preview" in ids
+    assert "MiniMax-M3" in ids
+
+
+def test_minimax_reasoning_details_list_schema() -> None:
+    """reasoning_details 实际是 list[{"type":"reasoning.text","text":...}]。"""
+    from seed.core.llm_exec import _extract_reasoning_details_text
+    raw = [{"type": "reasoning.text", "id": "reasoning-text-1",
+            "format": "MiniMax-response-v1", "index": 0, "text": "hello"}]
+    assert _extract_reasoning_details_text(raw) == "hello"
+    # 兼容旧形态
+    assert _extract_reasoning_details_text({"summary": [{"type": "summary_text", "text": "s"}]}) == "s"
+    assert _extract_reasoning_details_text({"reasoning_text": "r"}) == "r"
+    assert _extract_reasoning_details_text(None) == ""

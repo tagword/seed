@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- fix(minimax): 思考模式/思考强度控制全部失效 — 三个独立缺陷：
+  1. **关闭思考无效**：旧实现只传 `reasoning_split`，从不传 `thinking`，服务端因此始终思考（M3 实测：`enable_thinking=False` 仍返回 `<think>` 内联 CoT）。改为按模型能力传 `thinking={"type":"adaptive"|"disabled"}`。
+  2. **思考内容污染正文**：`reasoning_split` 未显式传值时服务端默认把 thinking 内联进 `content`（`<think>…</think>` 被当成正文）。改为显式传 `reasoning_split=True/False`，思考走 `reasoning_content`。
+  3. **`reasoning_effort` 被丢弃**：MiniMax 要求顶层参数且取值域为 `low|medium|high|xhigh|max`（不支持 `none`），旧代码只对 DeepSeek 生效。新增 `normalize_minimax_reasoning_effort()` 做档位归一。
+- fix(minimax): 模型能力差异处理 — `MiniMax-M3.1-Flash-Preview` 强制 thinking（`disabled`→400）且强制 `reasoning_split=true`（`false`→400），现自动降级为 `adaptive`；M2.x 无法关闭 thinking，不再传无效的 `disabled`；`MiniMax-Text-01`/`VL-01` 无 thinking 能力，不传任何思考字段（此前会误传导致 400）
+- fix(minimax): `_extract_reasoning_details_text` 解析实际 schema — 真实返回是 `[{"type":"reasoning.text","text":...}]`（list of blocks），旧实现只认 `{"summary":[...]}` 形态，导致 `reasoning_details` 一直解析为空
+- feat(minimax): 新增 `MiniMax-M3.1-Flash-Preview`（强制 thinking + 思考深度档位）；默认聊天模型 `MiniMax-M2.7` → `MiniMax-M3`
+- fix(minimax): 上下文窗口表补 `MiniMax-M3.1-Flash-Preview`（1M）
+- feat(webui): 推理强度下拉从 `高/最高` 扩展为 `低/中/高/极高/最高`（MiniMax 全档位；DeepSeek 后端自动归一为 `high|max`）
+- test: 新增 17 个用例覆盖 MiniMax 思考模式 wire payload（`tests/test_llm_exec_regressions.py` + `tests/test_model_providers.py`）
+
 ## 1.0.19 (2026-08-27)
 
 - fix(core): `ToolExecutor` 调度参数 `tool_name` → `tool` — 消除与工具入参同名冲突（如 `mcp_call` 的工具参数也叫 `tool_name`，`execute_async("mcp_call", tool_name=..., ...)` 抛 `TypeError: got multiple values`，请求到不了 MCP server）。修复 mcp_call 调用必崩问题

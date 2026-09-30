@@ -845,11 +845,20 @@ def _strip_think_tags(content: str) -> tuple[str, str]:
 
 
 def _extract_reasoning_details_text(raw: Any) -> str:
-    """Flatten MiniMax-M3 ``reasoning_details`` list to a single text.
+    """Flatten MiniMax ``reasoning_details`` to a single text.
 
-    Schema (when ``reasoning_split=True``):
-        ``{"summary": [{"type": "summary_text", "text": "..."}]}``
-    Older variants use ``{"reasoning_text": "..."}``.  Empty string on miss.
+    Actual schema (verified against api.minimaxi.com, 2026-09) — a **list** of
+    blocks::
+
+        [{"type": "reasoning.text", "id": "reasoning-text-1",
+          "format": "MiniMax-response-v1", "index": 0, "text": "..."}]
+
+    Older / alternate variants:
+      - ``{"summary": [{"type": "summary_text", "text": "..."}]}``
+      - ``{"reasoning_text": "..."}``
+      - a bare string
+
+    Empty string on miss.
     """
     if raw is None:
         return ""
@@ -857,6 +866,15 @@ def _extract_reasoning_details_text(raw: Any) -> str:
     if isinstance(raw, str):
         return raw
     if isinstance(raw, dict):
+        # Primary shape: {"type": "reasoning.text", "text": "..."}
+        if isinstance(raw.get("text"), str) and raw.get("type") in (
+            "reasoning.text",
+            "text",
+            "summary_text",
+            "reasoning_text",
+            None,
+        ):
+            pieces.append(raw["text"])
         summary = raw.get("summary")
         if isinstance(summary, list):
             for s in summary:
@@ -867,10 +885,7 @@ def _extract_reasoning_details_text(raw: Any) -> str:
         rt = raw.get("reasoning_text")
         if isinstance(rt, str) and rt.strip():
             pieces.append(rt)
-        # 兼容 list 元素直接传 dict 的形态：{"type": "summary_text", "text": "..."}
-        if not pieces and raw.get("type") in ("summary_text", "reasoning_text", None) and isinstance(raw.get("text"), str):
-            pieces.append(raw["text"])
-        return "\n\n".join(pieces)
+        return "\n\n".join(p for p in pieces if p and p.strip())
     if isinstance(raw, list):
         for item in raw:
             t = _extract_reasoning_details_text(item)
@@ -1019,9 +1034,11 @@ def _to_minimax_anthropic_request(
             ]
 
     if extra_body:
-        # Carry through thinking / reasoning_split etc.
+        # Carry through provider params, but drop the OpenAI-compatible-only
+        # thinking switches: the Anthropic Messages protocol has its own
+        # ``thinking`` block ({"type": "enabled", "budget_tokens": N}).
         for k, v in extra_body.items():
-            if k in ("reasoning_split",):
+            if k in ("reasoning_split", "thinking", "reasoning_effort"):
                 continue
             payload.setdefault(k, v)
     return payload
@@ -1117,6 +1134,7 @@ def normalize_minimax_usage(usage: Dict[str, Any]) -> Dict[str, Any]:
 
 
 MINIMAX_CONTEXT_WINDOWS: Dict[str, int] = {
+    "MiniMax-M3.1-Flash-Preview": 1_000_000,
     "MiniMax-M3": 1_000_000,
     "MiniMax-M2.7": 204_800,
     "MiniMax-M2.7-highspeed": 204_800,
