@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- fix(llm_exec): 请求参数跨供应商兼容 —
+  - `generate` / `generate_stream` 统一走新增的 `_post_chat()`：`400/422` 参数错误自动修正并重试一次（鉴权/限流/5xx 不重试）。
+  - OpenAI 推理模型（`o1`/`o3`/`o4`/`gpt-5+`）自动发送 `max_completion_tokens`；DeepSeek NInfer 自动剥离非中性 `repetition_penalty`。
+  - `max_tokens` clamp / Anthropic 分支改用 `get_max_tokens()` / `set_max_tokens()`，兼容两种字段名。
+
 - fix(minimax): 思考模式/思考强度控制全部失效 — 三个独立缺陷：
   1. **关闭思考无效**：旧实现只传 `reasoning_split`，从不传 `thinking`，服务端因此始终思考（M3 实测：`enable_thinking=False` 仍返回 `<think>` 内联 CoT）。改为按模型能力传 `thinking={"type":"adaptive"|"disabled"}`。
   2. **思考内容污染正文**：`reasoning_split` 未显式传值时服务端默认把 thinking 内联进 `content`（`<think>…</think>` 被当成正文）。改为显式传 `reasoning_split=True/False`，思考走 `reasoning_content`。

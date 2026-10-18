@@ -109,6 +109,56 @@ def _requests_proxies_for(url: str):
         return None
 
 
+def _post_chat(
+    url: str,
+    *,
+    headers: Dict[str, str],
+    params: Dict[str, Any],
+    stream: bool = False,
+    base_url: Optional[str] = None,
+) -> "requests.Response":
+    """POST a chat request, correcting known parameter incompatibilities once.
+
+    A 400 caused by an unsupported parameter costs no tokens, so one corrective
+    retry is cheaper (and more robust) than hard-coding every gateway's quirks.
+    Non-parameter errors (auth, quota, 5xx) are returned untouched.
+    """
+    from seed.core.model_providers import fix_params_from_error
+
+    def _send() -> "requests.Response":
+        kwargs: Dict[str, Any] = {
+            "headers": headers,
+            "json": params,
+            "timeout": 120,
+            "proxies": _requests_proxies_for(url),
+        }
+        if stream:
+            kwargs["stream"] = True
+        return requests.post(url, **kwargs)
+
+    resp = _send()
+    if resp.ok:
+        return resp
+
+    snippet = (resp.text or "")[:2000]
+    fixes = fix_params_from_error(
+        params, resp.status_code, snippet, base_url=base_url or url
+    )
+    if not fixes:
+        return resp
+
+    logger.warning(
+        "LLM HTTP %s: retrying with parameter fixes: %s",
+        resp.status_code,
+        ", ".join(fixes),
+    )
+    try:
+        resp.close()
+    except Exception:  # noqa: BLE001
+        pass
+    return _send()
+
+
 def generate(
     self,
     messages: List[Dict[str, Any]],
@@ -190,6 +240,26 @@ def generate(
     for k, v in extra_body.items():
         params.setdefault(k, v)
 
+    # Provider parameter compatibility: completion-budget key + unsupported
+    # samplers (DeepSeek NInfer rejects non-neutral repetition_penalty, OpenAI
+    # reasoning models reject max_tokens).
+    from seed.core.model_providers import (
+        apply_max_tokens_param,
+        get_max_tokens,
+        sanitize_chat_params,
+        set_max_tokens,
+    )
+
+    if self.chat_protocol != "minimax_anthropic":
+        apply_max_tokens_param(
+            params, model=self.model, provider=self.provider, base_url=self.baseURL
+        )
+    _dropped = sanitize_chat_params(
+        params, provider=self.provider, base_url=self.baseURL, model=self.model
+    )
+    if _dropped:
+        logger.warning("Adjusted chat params: %s", "; ".join(_dropped))
+
     max_body = max_llm_request_body_bytes(self.baseURL, chat_protocol=self.chat_protocol)
     if max_body > 0:
         maybe_shrink_llm_request_params(params, max_bytes=max_body, base_url=self.baseURL)
@@ -208,7 +278,7 @@ def generate(
         est_in = max(1, len(body.encode("utf-8")) // max(div, 1))
         margin = int(_ea.pick_default("8192", *_ea.LLM_CONTEXT_MARGIN))
         cap = ctx - est_in - margin
-        req = int(params.get("max_tokens") or 0)
+        req = get_max_tokens(params)
         if req > 0:
             allowance = max(1, cap) if cap > 0 else 1
             safe = max(1, min(req, allowance))
@@ -221,7 +291,7 @@ def generate(
                     ctx,
                     margin,
                 )
-                params["max_tokens"] = safe
+                set_max_tokens(params, safe)
 
     # MiniMax-only precheck: ask the API for an exact input-token estimate
     # before paying for a request that may exceed the model's context window.
@@ -265,7 +335,7 @@ def generate(
         params = _to_minimax_anthropic_request(
             api_messages,
             model=self.model,
-            max_tokens=int(params.get("max_tokens") or self.maxOutputTokens),
+            max_tokens=get_max_tokens(params, self.maxOutputTokens),
             tools=tools,
             enable_caching=True,
             extra_body=extra_body,
@@ -273,12 +343,8 @@ def generate(
 
     try:
         _url = self._get_completion_url()
-        response = requests.post(
-            _url,
-            headers=self.headers,
-            json=params,
-            timeout=120,
-            proxies=_requests_proxies_for(_url),
+        response = _post_chat(
+            _url, headers=self.headers, params=params, base_url=self.baseURL
         )
         if not response.ok:
             snippet = (response.text or "")[:2000]
@@ -456,6 +522,26 @@ def generate_stream(
     for k, v in extra_body.items():
         params.setdefault(k, v)
 
+    # Provider parameter compatibility: completion-budget key + unsupported
+    # samplers (DeepSeek NInfer rejects non-neutral repetition_penalty, OpenAI
+    # reasoning models reject max_tokens).
+    from seed.core.model_providers import (
+        apply_max_tokens_param,
+        get_max_tokens,
+        sanitize_chat_params,
+        set_max_tokens,
+    )
+
+    if self.chat_protocol != "minimax_anthropic":
+        apply_max_tokens_param(
+            params, model=self.model, provider=self.provider, base_url=self.baseURL
+        )
+    _dropped = sanitize_chat_params(
+        params, provider=self.provider, base_url=self.baseURL, model=self.model
+    )
+    if _dropped:
+        logger.warning("Adjusted chat params: %s", "; ".join(_dropped))
+
     apply_chat_stream_options(chat_protocol=self.chat_protocol, params=params)
 
     max_body = max_llm_request_body_bytes(self.baseURL, chat_protocol=self.chat_protocol)
@@ -465,13 +551,8 @@ def generate_stream(
     resp = None
     try:
         _url = self._get_completion_url()
-        resp = requests.post(
-            _url,
-            headers=self.headers,
-            json=params,
-            stream=True,
-            timeout=120,
-            proxies=_requests_proxies_for(_url),
+        resp = _post_chat(
+            _url, headers=self.headers, params=params, stream=True, base_url=self.baseURL
         )
         if not resp.ok:
             snippet = (resp.text or "")[:2000]

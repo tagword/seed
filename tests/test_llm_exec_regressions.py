@@ -146,3 +146,107 @@ def test_minimax_payload_text01_no_thinking_fields() -> None:
     assert "thinking" not in body
     assert "reasoning_split" not in body
     assert "reasoning_effort" not in body
+
+
+def test_generate_retries_with_max_completion_tokens(monkeypatch) -> None:
+    """A 400 asking for max_completion_tokens must be corrected and retried once."""
+    calls = []
+
+    class _Resp400:
+        ok = False
+        status_code = 400
+        text = (
+            '{"error":{"message":"Unsupported parameter: \'max_tokens\' is not '
+            'supported with this model. Use \'max_completion_tokens\' instead.",'
+            '"type":"invalid_request_error","param":"max_tokens",'
+            '"code":"unsupported_parameter"}}'
+        )
+
+        def close(self):
+            pass
+
+    class _Resp200:
+        ok = True
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {
+                "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+                "usage": {},
+            }
+
+    def _fake_post(url, headers, json, timeout, proxies):  # noqa: ANN001
+        calls.append(dict(json))
+        return _Resp400() if len(calls) == 1 else _Resp200()
+
+    monkeypatch.setattr(llm_exec.requests, "post", _fake_post)
+
+    exe = llm_exec.LLMAPIExecutor(
+        baseURL="https://gw.example/v1", model="custom-reasoner"
+    )
+    content, _meta = exe.generate([{"role": "user", "content": "hi"}])
+
+    assert content == "ok"
+    assert len(calls) == 2
+    assert "max_tokens" in calls[0] and "max_completion_tokens" not in calls[0]
+    assert "max_completion_tokens" in calls[1] and "max_tokens" not in calls[1]
+
+
+def test_generate_does_not_retry_auth_errors(monkeypatch) -> None:
+    calls = []
+
+    class _Resp401:
+        ok = False
+        status_code = 401
+        text = '{"error":{"message":"invalid api key"}}'
+
+        def close(self):
+            pass
+
+    def _fake_post(url, headers, json, timeout, proxies):  # noqa: ANN001
+        calls.append(1)
+        return _Resp401()
+
+    monkeypatch.setattr(llm_exec.requests, "post", _fake_post)
+
+    exe = llm_exec.LLMAPIExecutor(
+        baseURL="https://gw.example/v1", model="custom-reasoner"
+    )
+    try:
+        exe.generate([{"role": "user", "content": "hi"}])
+    except llm_exec.LLMError:
+        pass
+    assert len(calls) == 1
+
+
+def test_generate_drops_repetition_penalty_before_sending(monkeypatch) -> None:
+    captured = {}
+
+    class _Resp:
+        ok = True
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {
+                "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+                "usage": {},
+            }
+
+    def _fake_post(url, headers, json, timeout, proxies):  # noqa: ANN001
+        captured["json"] = json
+        return _Resp()
+
+    monkeypatch.setattr(llm_exec.requests, "post", _fake_post)
+    monkeypatch.setenv(
+        "SEED_LLM_EXTRA_BODY", '{"repetition_penalty": 1.1}'
+    )
+
+    exe = llm_exec.LLMAPIExecutor(
+        baseURL="https://api.deepseek.com/v1", model="deepseek-4.1-flash"
+    )
+    content, _meta = exe.generate([{"role": "user", "content": "hi"}])
+
+    assert content == "ok"
+    assert "repetition_penalty" not in captured["json"]

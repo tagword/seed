@@ -28,10 +28,13 @@ except ModuleNotFoundError:
             sys.path.insert(0, _smp_root_str)
 
 from seed_model_providers import (  # type: ignore[import-untyped, unused-ignore]
+    MAX_COMPLETION_TOKENS,
+    MAX_TOKENS,
     PROVIDER_CATALOG,
     USE_TYPE_LABELS,
     apply_chat_thinking_extra_body,
     apply_chat_stream_options,
+    apply_max_tokens_param,
     apply_provider_chat_headers,
     call_agnes_video_generation,
     call_image_generations,
@@ -41,6 +44,13 @@ from seed_model_providers import (  # type: ignore[import-untyped, unused-ignore
     call_video_generations,
     default_max_request_body_bytes,
     enrich_preset_defaults,
+    fix_params_from_error,
+    get_max_tokens,
+    is_param_error,
+    max_tokens_param_for,
+    reset_param_cache,
+    sanitize_chat_params,
+    set_max_tokens,
     enrich_presets_for_ui,
     get_provider_spec,
     infer_preset_use_type,
