@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.20 (2026-10-18)
 
 - fix(llm_exec): 请求参数跨供应商兼容 —
   - `generate` / `generate_stream` 统一走新增的 `_post_chat()`：`400/422` 参数错误自动修正并重试一次（鉴权/限流/5xx 不重试）。
