@@ -366,7 +366,7 @@ async def _run_cron_job_async(job: Dict[str, Any]) -> None:
         pass
 
     project_id = (str(job.get("project_id") or "")).strip() or ""
-    mkey = _memkey(agent_id, sid)
+    mkey = _memkey(agent_id, sid, project_id)
     from seed.core.llm_sess import (
         load_or_create_chat_session,
         merge_fresh_system,
@@ -864,7 +864,7 @@ def run_cron_job_sync(job: Dict[str, Any]) -> None:
         pass
 
     project_id = (str(job.get("project_id") or "")).strip() or ""
-    mkey = _memkey(agent_id, sid)
+    mkey = _memkey(agent_id, sid, project_id)
     from seed.core.llm_sess import (
         load_or_create_chat_session,
         merge_fresh_system,
