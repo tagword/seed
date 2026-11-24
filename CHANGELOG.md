@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.20 (2026-10-18)
+## 1.0.21 (2026-11-25)
 
 - fix(session_cache): `_memkey` 加入 `project_id`，修复跨项目会话串台 —
   根因：`_memkey(agent_id, session_id)` 只拼 `agent::session`，缺少项目维度。`session_id` 只在项目内唯一，
@@ -9,6 +9,8 @@
   - `_memkey(agent_id, session_id, project_id="")` → `agent::project::session`，`project_id` 为空时退化为旧格式保证兼容
   - `cron_sched` 两处调用点补 `project_id`
   - 新增 `tests/test_session_cache_memkey.py`（6 项，含"禁止无 project_id 的 _memkey 调用"守卫）
+
+## 1.0.20 (2026-10-18)
 
 - fix(llm_exec): 请求参数跨供应商兼容 —
   - `generate` / `generate_stream` 统一走新增的 `_post_chat()`：`400/422` 参数错误自动修正并重试一次（鉴权/限流/5xx 不重试）。
