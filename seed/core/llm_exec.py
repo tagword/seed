@@ -115,7 +115,12 @@ class LLMAPIExecutor:
         try:
             url = self._get_completion_url()
             resp = _post_chat(
-                url, headers=self.headers, params=params, stream=True, base_url=self.baseURL
+                url,
+                headers=self.headers,
+                params=params,
+                stream=True,
+                base_url=self.baseURL,
+                retry_transform=_responses_reasoning_fallback,
             )
             if not resp.ok:
                 snippet = (resp.text or "")[:2000]
@@ -203,6 +208,34 @@ def _requests_proxies_for(url: str):
         return None
 
 
+def _responses_reasoning_fallback(
+    status: int, body: str, params: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """Retry hook for the Responses protocol: drop reasoning items and retry.
+
+    OpenAI rejects a request whose ``input`` omits a reasoning item that
+    immediately preceded a ``function_call``.  Returning the stripped params
+    makes :func:`_post_chat` retry once without them (the model re-reasons
+    instead of continuing the previous trace).
+
+    Returns ``None`` when the error is unrelated, so no retry is attempted.
+    """
+    try:
+        from seed.core.llm_responses import (
+            is_missing_reasoning_item_error,
+            strip_reasoning_items,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    if not is_missing_reasoning_item_error(status, body):
+        return None
+    stripped = strip_reasoning_items(params)
+    if stripped.get("input") == params.get("input"):
+        # Nothing to strip — retrying would send the identical request.
+        return None
+    return stripped
+
+
 def _post_chat(
     url: str,
     *,
@@ -210,12 +243,19 @@ def _post_chat(
     params: Dict[str, Any],
     stream: bool = False,
     base_url: Optional[str] = None,
+    retry_transform: Optional[Any] = None,
 ) -> "requests.Response":
     """POST a chat request, correcting known parameter incompatibilities once.
 
     A 400 caused by an unsupported parameter costs no tokens, so one corrective
     retry is cheaper (and more robust) than hard-coding every gateway's quirks.
     Non-parameter errors (auth, quota, 5xx) are returned untouched.
+
+    ``retry_transform`` is an optional hook
+    ``(status, body, params) -> params | None`` used by the Responses
+    protocol: OpenAI rejects a request whose input drops a reasoning item that
+    immediately preceded a function call, so we retry once with the reasoning
+    items stripped.  Returning ``None`` means "no fallback available".
     """
     from seed.core.model_providers import fix_params_from_error
 
@@ -238,6 +278,20 @@ def _post_chat(
     fixes = fix_params_from_error(
         params, resp.status_code, snippet, base_url=base_url or url
     )
+    if not fixes and retry_transform is not None:
+        try:
+            transformed = retry_transform(resp.status_code, snippet, params)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("retry_transform failed: %s", e)
+            transformed = None
+        if transformed:
+            params.clear()
+            params.update(transformed)
+            logger.warning(
+                "LLM HTTP %s: retrying with protocol-specific fallback",
+                resp.status_code,
+            )
+            fixes = ["protocol fallback"]
     if not fixes:
         return resp
 
@@ -463,7 +517,13 @@ def generate(
     try:
         _url = self._get_completion_url()
         response = _post_chat(
-            _url, headers=self.headers, params=params, base_url=self.baseURL
+            _url,
+            headers=self.headers,
+            params=params,
+            base_url=self.baseURL,
+            retry_transform=(
+                _responses_reasoning_fallback if self.chat_protocol == "openai_responses" else None
+            ),
         )
         if not response.ok:
             snippet = (response.text or "")[:2000]

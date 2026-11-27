@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.0.24 (2026-11-25)
+
+- **fix(responses): reasoning item 缺失时降级重试**
+  - OpenAI 在「reasoning item 紧邻 function_call 但被丢弃」时会以 400 拒绝请求
+    （"provided without its required following item"）
+  - `_post_chat` 新增 `retry_transform` 钩子 `(status, body, params) -> params | None`：
+    协议专属的降级路径，不影响既有的参数兼容重试
+  - `llm_responses.strip_reasoning_items()` 剥离 `input[]` 中的 reasoning item，
+    剥离后重试一次（模型改为重新推理，是有效但略低效的结果）
+  - `llm_responses.is_missing_reasoning_item_error()` 精确识别该类 400，
+    鉴权/限流等其他错误不触发重试
+  - 非流式与流式两条路径均已接入
+
+### 测试
+
+- `tests/test_llm_responses_protocol.py` 新增 5 项（剥离、错误识别、钩子行为）
+- `tests/test_llm_responses_e2e.py` 新增 1 项端到端：mock 服务端首次以 400 拒绝
+  带 reasoning 的请求 → 客户端自动剥离并重试 → 成功返回（断言两次请求的 input 差异）
+
 ## 1.0.23 (2026-11-25)
 
 - style: `llm_responses.py` 清理未使用变量、改用 `contextlib.suppress`；

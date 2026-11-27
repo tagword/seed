@@ -487,3 +487,73 @@ def test_response_output_item_types_are_known() -> None:
     out = parse_responses_response(data)
     # All three items are handled without raising.
     assert out["choices"][0]["message"]["tool_calls"][0]["id"] == "c"
+
+
+# ---------------------------------------------------------------------------
+# fallback: drop reasoning items and retry
+# ---------------------------------------------------------------------------
+
+def test_strip_reasoning_items_removes_only_reasoning() -> None:
+    from seed.core.llm_responses import strip_reasoning_items
+
+    params = {
+        "model": "gpt-5.1",
+        "input": [
+            {"type": "reasoning", "summary": []},
+            {"type": "message", "role": "user", "content": []},
+            {"type": "function_call", "call_id": "c", "name": "f", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "c", "output": "ok"},
+        ],
+    }
+    out = strip_reasoning_items(params)
+    assert [i["type"] for i in out["input"]] == [
+        "message",
+        "function_call",
+        "function_call_output",
+    ]
+    # original untouched
+    assert len(params["input"]) == 4
+
+
+def test_strip_reasoning_items_noop_without_reasoning() -> None:
+    from seed.core.llm_responses import strip_reasoning_items
+
+    params = {"input": [{"type": "message", "role": "user", "content": []}]}
+    out = strip_reasoning_items(params)
+    assert out["input"] == params["input"]
+
+
+def test_missing_reasoning_item_error_detected() -> None:
+    from seed.core.llm_responses import is_missing_reasoning_item_error
+
+    body = (
+        "Item 'rs_123' of type 'reasoning' was provided without its required "
+        "following item."
+    )
+    assert is_missing_reasoning_item_error(400, body) is True
+    assert is_missing_reasoning_item_error(400, "invalid api key") is False
+    assert is_missing_reasoning_item_error(500, body) is False
+
+
+def test_responses_fallback_hook_returns_stripped_params() -> None:
+    from seed.core.llm_exec import _responses_reasoning_fallback
+
+    params = {
+        "model": "gpt-5.1",
+        "input": [
+            {"type": "reasoning", "summary": []},
+            {"type": "function_call", "call_id": "c", "name": "f", "arguments": "{}"},
+        ],
+    }
+    body = "reasoning item was provided without its required following item"
+    out = _responses_reasoning_fallback(400, body, params)
+    assert out is not None
+    assert [i["type"] for i in out["input"]] == ["function_call"]
+
+
+def test_responses_fallback_hook_ignores_unrelated_errors() -> None:
+    from seed.core.llm_exec import _responses_reasoning_fallback
+
+    params = {"input": [{"type": "reasoning", "summary": []}]}
+    assert _responses_reasoning_fallback(401, "unauthorized", params) is None
+    assert _responses_reasoning_fallback(400, "rate limit", params) is None

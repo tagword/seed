@@ -40,6 +40,8 @@ __all__ = [
     "parse_responses_tools",
     "iter_responses_stream",
     "responses_usage_to_openai",
+    "strip_reasoning_items",
+    "is_missing_reasoning_item_error",
 ]
 
 RESPONSES_PROTOCOL = "openai_responses"
@@ -411,6 +413,45 @@ def responses_usage_to_openai(usage: Any) -> Dict[str, Any]:
         if key not in out and usage.get(key) is not None:
             out[key] = usage[key]
     return out
+
+
+def strip_reasoning_items(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a copy of ``params`` with all ``reasoning`` input items removed.
+
+    OpenAI rejects a Responses request whose ``input`` drops a reasoning item
+    that immediately preceded a ``function_call`` ("Item 'rs_…' of type
+    'reasoning' was provided without its required following item").  When
+    that happens we retry once without reasoning items: the model simply
+    re-reasons instead of continuing the previous trace, which is a valid
+    (if slightly less efficient) outcome.
+    """
+    out = dict(params)
+    items = out.get("input")
+    if not isinstance(items, list):
+        return out
+    kept = [i for i in items if not (isinstance(i, dict) and i.get("type") == "reasoning")]
+    if len(kept) == len(items):
+        return out
+    out["input"] = kept
+    return out
+
+
+def is_missing_reasoning_item_error(status: int, body: str) -> bool:
+    """Whether a 400 is the "dropped reasoning item" rejection."""
+    if status != 400:
+        return False
+    low = (body or "").lower()
+    if "reasoning" not in low:
+        return False
+    return any(
+        marker in low
+        for marker in (
+            "without its required following item",
+            "was provided without",
+            "reasoning item",
+            "reasoning_items",
+        )
+    )
 
 
 def parse_responses_response(data: Dict[str, Any]) -> Dict[str, Any]:

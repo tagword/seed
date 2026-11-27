@@ -18,6 +18,32 @@ from seed.core.llm_exec import LLMAPIExecutor
 RECEIVED: list[dict] = []
 
 
+def _ok_payload(body: dict) -> dict:
+    """A minimal successful Responses payload."""
+    return {
+        "id": "resp_test",
+        "object": "response",
+        "model": body.get("model"),
+        "status": "completed",
+        "output": [
+            {
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": "let me think"}],
+            },
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Hi there"}],
+            },
+        ],
+        "usage": {
+            "input_tokens": 7,
+            "output_tokens": 4,
+            "total_tokens": 11,
+        },
+    }
+
+
 class _Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):  # silence
         pass
@@ -54,43 +80,46 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
             return
 
-        self.send_response(200)
+        self._write_json(200, _ok_payload(body))
+
+    def _write_json(self, status: int, payload: dict) -> None:
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
-        payload = {
-            "id": "resp_test",
-            "object": "response",
-            "model": body.get("model"),
-            "status": "completed",
-            "output": [
-                {
-                    "type": "reasoning",
-                    "summary": [{"type": "summary_text", "text": "let me think"}],
-                },
-                {
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [{"type": "output_text", "text": "Hi there"}],
-                },
-            ],
-            "usage": {
-                "input_tokens": 7,
-                "output_tokens": 4,
-                "total_tokens": 11,
-            },
-        }
         self.wfile.write(json.dumps(payload).encode())
+
+
+def _serve(handler_cls):
+    """Start a local HTTP server with ``handler_cls`` and return its base URL."""
+    httpd = HTTPServer(("127.0.0.1", 0), handler_cls)
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    host, port = httpd.server_address
+    return httpd, f"http://{host}:{port}/v1"
 
 
 @pytest.fixture()
 def server():
     RECEIVED.clear()
-    httpd = HTTPServer(("127.0.0.1", 0), _Handler)
-    t = threading.Thread(target=httpd.serve_forever, daemon=True)
-    t.start()
-    host, port = httpd.server_address
-    yield f"http://{host}:{port}/v1"
+    httpd, url = _serve(_Handler)
+    yield url
     httpd.shutdown()
+
+
+@pytest.fixture()
+def server_factory():
+    """Factory fixture: ``server_factory(HandlerClass) -> base_url``."""
+    servers = []
+
+    def _make(handler_cls):
+        RECEIVED.clear()
+        httpd, url = _serve(handler_cls)
+        servers.append(httpd)
+        return url
+
+    yield _make
+    for httpd in servers:
+        httpd.shutdown()
 
 
 def _executor(base_url: str) -> LLMAPIExecutor:
@@ -211,3 +240,71 @@ def test_tools_are_flattened(server: str) -> None:
     assert body["tools"][0]["name"] == "f"
     assert "function" not in body["tools"][0]
     assert body["tool_choice"] == "auto"
+
+
+# ---------------------------------------------------------------------------
+# fallback retry: server rejects a dropped reasoning item
+# ---------------------------------------------------------------------------
+
+class _RejectReasoningHandler(_Handler):
+    """First request carrying reasoning items → 400; without → 200.
+
+    The body is parsed exactly once here — the shared response writer lives in
+    ``_Handler._write_json`` so the parent never re-reads the request body.
+    """
+
+    calls = 0
+
+    def do_POST(self):  # noqa: N802
+        length = int(self.headers.get("Content-Length") or 0)
+        body = json.loads(self.rfile.read(length) or b"{}")
+        RECEIVED.append({"path": self.path, "body": body})
+        type(self).calls += 1
+        items = body.get("input") or []
+        has_reasoning = any(
+            isinstance(i, dict) and i.get("type") == "reasoning" for i in items
+        )
+        if has_reasoning and type(self).calls == 1:
+            self._write_json(
+                400,
+                {
+                    "error": {
+                        "message": (
+                            "Item 'rs_1' of type 'reasoning' was provided without "
+                            "its required following item."
+                        ),
+                        "type": "invalid_request_error",
+                    }
+                },
+            )
+            return
+        type(self).calls = 0
+        self._write_json(200, _ok_payload(body))
+
+
+def test_missing_reasoning_item_triggers_fallback_retry(server_factory) -> None:
+    ex = LLMAPIExecutor(
+        baseURL=server_factory(_RejectReasoningHandler),
+        model="gpt-5.1",
+        api_key="sk-test",
+        maxOutputTokens=256,
+        provider="openai_responses",
+    )
+    content, meta = ex.generate(
+        [
+            {
+                "role": "assistant",
+                "content": "prev",
+                "reasoning_content": "thought",
+            },
+            {"role": "user", "content": "hi"},
+        ]
+    )
+    assert content == "Hi there"
+    # The server saw two requests: the first with reasoning (rejected),
+    # the second without it (accepted).
+    assert len(RECEIVED) == 2
+    first_items = RECEIVED[0]["body"]["input"]
+    second_items = RECEIVED[1]["body"]["input"]
+    assert any(i.get("type") == "reasoning" for i in first_items)
+    assert not any(i.get("type") == "reasoning" for i in second_items)
