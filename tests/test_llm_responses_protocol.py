@@ -7,6 +7,7 @@ import json
 from seed_model_providers.model_providers import (
     _RESPONSES_REASONING_EFFORTS as _RESPONSES_EFFORTS,
 )
+
 from seed.core.llm_responses import (
     build_responses_input,
     iter_responses_stream,
@@ -15,7 +16,6 @@ from seed.core.llm_responses import (
     responses_usage_to_openai,
     to_responses_request,
 )
-
 
 # ---------------------------------------------------------------------------
 # request: messages -> input items
@@ -477,7 +477,6 @@ def test_request_keys_are_all_legal_for_responses_api() -> None:
 
 def test_response_output_item_types_are_known() -> None:
     """Only the item types the adapter understands may appear."""
-    known = {"message", "reasoning", "function_call"}
     data = {
         "output": [
             {"type": "reasoning", "summary": []},

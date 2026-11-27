@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.23 (2026-11-25)
+
+- style: `llm_responses.py` 清理未使用变量、改用 `contextlib.suppress`；
+  测试文件 import 排序修正（ruff F841 / SIM105 / I001）
+
 ## 1.0.22 (2026-11-25)
 
 - **feat(responses): 新增 OpenAI Responses API 协议支持**（`POST {base_url}/responses`）

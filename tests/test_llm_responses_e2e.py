@@ -15,7 +15,6 @@ import pytest
 
 from seed.core.llm_exec import LLMAPIExecutor
 
-
 RECEIVED: list[dict] = []
 
 

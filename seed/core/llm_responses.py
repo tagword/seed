@@ -25,6 +25,7 @@ pattern in this codebase rather than a new invention.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from typing import Any, Dict, Iterable, Iterator, List, Optional
@@ -403,10 +404,8 @@ def responses_usage_to_openai(usage: Any) -> Dict[str, Any]:
     if total is not None:
         out["total_tokens"] = total
     else:
-        try:
+        with contextlib.suppress(TypeError, ValueError):
             out["total_tokens"] = int(input_tokens or 0) + int(output_tokens or 0)
-        except (TypeError, ValueError):
-            pass
     # Some gateways mirror Chat Completions keys; preserve them.
     for key in ("prompt_tokens", "completion_tokens"):
         if key not in out and usage.get(key) is not None:
@@ -620,8 +619,7 @@ def iter_responses_stream(
             resp = event.get("response")
             if isinstance(resp, dict):
                 usage = responses_usage_to_openai(resp.get("usage")) or usage
-                details = resp.get("incomplete_details")
-                status = "incomplete"
+            status = "incomplete"
             continue
 
         if etype == "response.failed":
