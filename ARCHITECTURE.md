@@ -30,6 +30,7 @@ seed/
 │   ├── core/                   # ★ 核心运行时
 │   │   ├── agent_runtime.py    # Agent 主循环（run_llm_tool_loop）
 │   │   ├── llm_exec.py         # LLM 调用执行器
+│   │   ├── llm_responses.py   # OpenAI Responses 协议适配器（item 化请求/响应/流式）
 │   │   ├── turn_loop.py        # 多轮工具调用循环
 │   │   ├── tool_runtime.py     # 工具注册表与执行器（ToolRegistry）
 │   │   ├── engine.py           # 引擎入口（session run / stream）
@@ -97,6 +98,7 @@ seed/
 |------|------|
 | **agent_runtime** | Agent 主循环：接收消息 → LLM 调用 → 工具执行 → 生成回复 |
 | **llm_exec** | LLM API 调用封装（流式/非流式），支持多提供商路由 |
+| **llm_responses** | OpenAI Responses 协议适配：`/v1/responses` 的 item 化请求体构造、响应解析、SSE 事件流解析；内部统一保持 Chat Completions 消息形状，仅在协议边界做双向转换 |
 | **turn_loop** | 多轮工具调用编排，含压缩、审计、终止判断 |
 | **tool_runtime** | 工具注册（ToolRegistry）、查找、调用、结果处理 |
 | **engine** | 外部统一入口：创建/恢复会话，触发 run，流式输出 |

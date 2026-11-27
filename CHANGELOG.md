@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.0.22 (2026-11-25)
+
+- **feat(responses): 新增 OpenAI Responses API 协议支持**（`POST {base_url}/responses`）
+  - 新增 `seed/core/llm_responses.py` 协议适配器：
+    - `build_responses_input()` / `to_responses_request()`：Chat Completions 形状 → Responses
+      item 化请求体（`system`→`instructions`、`tool`→`function_call_output`、
+      assistant `tool_calls`→`function_call`、`reasoning_content`→`reasoning` item）
+    - `parse_responses_response()`：Responses `output[]` → Chat Completions 形状
+      （`message`→content、`reasoning`→reasoning_content、`function_call`→tool_calls、
+      usage `input_tokens`→`prompt_tokens`）
+    - `iter_responses_stream()`：Responses SSE 事件流 → 既有 delta 事件形状
+      （`response.output_text.delta`→delta、`response.reasoning_summary_text.delta`→reasoning_delta、
+      `response.function_call_arguments.delta`→tool_calls、`response.completed`→done+usage）
+  - `llm_exec.py` 接线：
+    - `_get_completion_url()` → `{base}/responses`
+    - `generate()` 新增 Responses 分支；`max_tokens`/`max_completion_tokens` 重命名逻辑对该协议跳过
+      （Responses 用第三个键名 `max_output_tokens`）
+    - 新增 `_stream_openai_responses()` 独立流式路径
+  - 无状态全量回放：每轮重发完整历史作为 `input[]`，不使用 `previous_response_id`
+  - `store: false`：服务端默认留存响应内容，本项目显式关闭
+  - 协议矩阵与映射表文档：`docs/LLM_PROTOCOLS.md`
+
+### 测试
+
+- 新增 `tests/test_llm_responses_protocol.py`（28 项）：请求/响应/流式转换 + 与官方 OpenAI SDK
+  契约一致性（`reasoning.effort` 合法值、请求键白名单）
+- 新增 `tests/test_llm_responses_e2e.py`（5 项）：起本地 mock Responses 端点，跑通真实
+  executor 的请求路径、请求体形状、流式解析、tool call 往返、tools 扁平化
+
 ## 1.0.21 (2026-11-25)
 
 - fix(session_cache): `_memkey` 加入 `project_id`，修复跨项目会话串台 —

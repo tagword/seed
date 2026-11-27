@@ -6,7 +6,7 @@ import logging
 import os
 import re
 import requests
-from typing import Any, Dict, Generator, List, Optional, Tuple
+from typing import Any, Dict, Generator, Iterator, List, Optional, Tuple
 
 from seed.core import env_access as _ea
 
@@ -90,7 +90,101 @@ class LLMAPIExecutor:
             if base.endswith("/v1"):
                 base = base[:-3]
             return f"{base}/v1/messages"
+        if self.chat_protocol == "openai_responses":
+            base = (self.baseURL or "").rstrip("/")
+            # Tolerate a base_url that already points at the endpoint.
+            if base.endswith("/responses"):
+                return base
+            return f"{base}/responses"
         return f"{self.baseURL}/chat/completions"
+
+    def _stream_openai_responses(
+        self, params: Dict[str, Any]
+    ) -> Iterator[Dict[str, Any]]:
+        """Stream a Responses-API request and yield Chat-Completions-shaped events.
+
+        The Responses SSE protocol emits typed events (``response.output_text
+        .delta``, ``response.function_call_arguments.delta`` …) instead of the
+        ``choices[]`` envelope, so it needs its own parser.  The yielded dicts
+        use the same shapes as the Chat Completions stream so every consumer
+        (tool loop, Web UI, session persistence) stays protocol-agnostic.
+        """
+        from seed.core.llm_responses import iter_responses_stream
+
+        resp = None
+        try:
+            url = self._get_completion_url()
+            resp = _post_chat(
+                url, headers=self.headers, params=params, stream=True, base_url=self.baseURL
+            )
+            if not resp.ok:
+                snippet = (resp.text or "")[:2000]
+                raise LLMError(
+                    f"LLM HTTP {resp.status_code} for {url}: {snippet}"
+                )
+
+            resp.encoding = "utf-8"
+
+            try:
+                from seed.core.chat_events import is_chat_cancelled
+            except Exception:
+                is_chat_cancelled = lambda: False  # type: ignore[assignment, misc]
+
+            def _lines() -> Iterator[str]:
+                for line in resp.iter_lines(decode_unicode=True):
+                    if is_chat_cancelled():
+                        break
+                    yield line
+
+            for event in iter_responses_stream(_lines()):
+                if event.get("type") == "done":
+                    meta = event.get("metadata") or {}
+                    built_tool_calls = meta.get("tool_calls") or []
+                    content = event.get("content") or ""
+                    reasoning = meta.get("reasoning") or ""
+                    if built_tool_calls and not content.strip():
+                        ph = assistant_toolcall_content_placeholder()
+                        if ph is not None:
+                            content = ph
+                    stream_usage = meta.get("usage") or {}
+                    from seed.core.model_providers import normalize_chat_usage
+
+                    stream_usage = normalize_chat_usage(
+                        stream_usage if isinstance(stream_usage, dict) else {},
+                        chat_protocol=self.chat_protocol,
+                        provider=self.provider,
+                    )
+                    yield {
+                        "type": "done",
+                        "content": content,
+                        "reasoning": reasoning,
+                        "tool_calls": built_tool_calls,
+                        "metadata": {
+                            "model": self.model,
+                            "usage": stream_usage,
+                            "tool_calls": built_tool_calls,
+                            "reasoning": reasoning,
+                            "reasoning_content": reasoning.strip(),
+                            "status": meta.get("status") or "completed",
+                        },
+                    }
+                    continue
+                yield event
+
+        except LLMError:
+            raise
+        except RuntimeError as e:
+            raise LLMError(f"Responses API stream error: {e}", original_error=e)
+        except requests.exceptions.RequestException as e:
+            raise LLMError(f"Failed to call LLM API (stream): {e}", original_error=e)
+        except (KeyError, IndexError, TypeError, ValueError) as e:
+            raise LLMError(f"Unexpected API stream response: {e}", original_error=e)
+        finally:
+            if resp is not None:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
     
 
 
@@ -250,7 +344,10 @@ def generate(
         set_max_tokens,
     )
 
-    if self.chat_protocol != "minimax_anthropic":
+    if self.chat_protocol not in ("minimax_anthropic", "openai_responses"):
+        # The Responses protocol uses ``max_output_tokens`` (a third key name),
+        # so the Chat Completions max_tokens/max_completion_tokens renaming
+        # must not run for it.
         apply_max_tokens_param(
             params, model=self.model, provider=self.provider, base_url=self.baseURL
         )
@@ -341,6 +438,28 @@ def generate(
             extra_body=extra_body,
         )
 
+    # OpenAI Responses 协议分支：把 OpenAI 形状的 messages 转换为 Responses
+    # 的 item 化 input（system → instructions，tool → function_call_output…）。
+    if self.chat_protocol == "openai_responses":
+        from seed.core.llm_responses import to_responses_request
+
+        reasoning_cfg = extra_body.get("reasoning")
+        params = to_responses_request(
+            api_messages,
+            model=self.model,
+            max_output_tokens=get_max_tokens(params, self.maxOutputTokens),
+            tools=tools,
+            reasoning=reasoning_cfg if isinstance(reasoning_cfg, dict) else None,
+            temperature=params.get("temperature"),
+            top_p=params.get("top_p"),
+            tool_choice=params.get("tool_choice"),
+            stream=False,
+            extra_body=None,
+        )
+        # The Responses endpoint rejects Chat Completions sampling knobs for
+        # reasoning models; drop them here instead of paying for a 400.
+        params.pop("top_k", None)
+
     try:
         _url = self._get_completion_url()
         response = _post_chat(
@@ -354,6 +473,10 @@ def generate(
         if self.chat_protocol == "minimax_anthropic":
             raw = response.json()
             data = _parse_minimax_anthropic_response(raw)
+        elif self.chat_protocol == "openai_responses":
+            from seed.core.llm_responses import parse_responses_response
+
+            data = parse_responses_response(response.json())
         else:
             data = response.json()
 
@@ -532,7 +655,10 @@ def generate_stream(
         set_max_tokens,
     )
 
-    if self.chat_protocol != "minimax_anthropic":
+    if self.chat_protocol not in ("minimax_anthropic", "openai_responses"):
+        # The Responses protocol uses ``max_output_tokens`` (a third key name),
+        # so the Chat Completions max_tokens/max_completion_tokens renaming
+        # must not run for it.
         apply_max_tokens_param(
             params, model=self.model, provider=self.provider, base_url=self.baseURL
         )
@@ -547,6 +673,28 @@ def generate_stream(
     max_body = max_llm_request_body_bytes(self.baseURL, chat_protocol=self.chat_protocol)
     if max_body > 0:
         maybe_shrink_llm_request_params(params, max_bytes=max_body, base_url=self.baseURL)
+
+    # OpenAI Responses 协议分支：请求体形状与流式事件都与 Chat Completions
+    # 不同，单独走一条解析路径，避免污染既有逻辑。
+    if self.chat_protocol == "openai_responses":
+        from seed.core.llm_responses import to_responses_request
+
+        reasoning_cfg = extra_body.get("reasoning")
+        params = to_responses_request(
+            api_messages,
+            model=self.model,
+            max_output_tokens=get_max_tokens(params, self.maxOutputTokens),
+            tools=tools,
+            reasoning=reasoning_cfg if isinstance(reasoning_cfg, dict) else None,
+            temperature=params.get("temperature"),
+            top_p=params.get("top_p"),
+            tool_choice=params.get("tool_choice"),
+            stream=True,
+            extra_body=None,
+        )
+        params.pop("top_k", None)
+        yield from self._stream_openai_responses(params)
+        return
 
     resp = None
     try:
